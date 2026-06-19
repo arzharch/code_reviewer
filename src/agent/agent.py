@@ -8,6 +8,7 @@ from src.common.config import settings
 from src.agent.ingestion import IngestionService
 from src.agent.analysis import StaticAnalysisService, LLMAnalysisService
 from src.execution_plane.sandbox import SandboxRuntime
+from src.agent.git_actions import GitActionsService
 
 # --- Stub Tool / Node Functions for Sprint 2 ---
 
@@ -119,7 +120,44 @@ def risk_score(state: AgentState) -> Dict[str, Any]:
 
 def aggregate_and_decide(state: AgentState) -> Dict[str, Any]:
     """Decides to auto-commit or escalate based on risk assessments."""
-    return {"status": "completed"}
+    assessments = state.get("risk_assessments", [])
+    proposals = state.get("proposals", [])
+    job = state["job"]
+    
+    # Check if any assessment requires escalation
+    should_escalate = any(a.decision == "escalate" for a in assessments)
+    
+    if should_escalate:
+        # Post comment on PR with the findings and proposals
+        comment = "## 🤖 Autonomous Code Review Escalation\\n\\nI found issues but the risk of auto-committing is too high. Please review my proposals:\\n\\n"
+        for idx, p in enumerate(proposals):
+            comment += f"### {p.finding_id}\\n"
+            comment += f"{p.description}\\n\\n"
+            comment += f"```diff\\n{p.diff}\\n```\\n\\n"
+            
+        if job.pr_number:
+            GitActionsService.post_pr_comment(job.repo, job.pr_number, comment)
+        return {"status": "escalated"}
+    else:
+        # All safe to auto-commit
+        if job.branch:
+            # We assume the sandbox has successfully verified, but we need to commit
+            # directly to the local clone, since sandbox is ephemeral.
+            # In production, we'd apply the patches to the repo local clone, then push.
+            sandbox = SandboxRuntime(job.repo)
+            sandbox.setup()
+            try:
+                sandbox.apply_proposals(proposals)
+                GitActionsService.commit_and_push(sandbox.sandbox_dir, proposals, job.branch)
+            finally:
+                sandbox.teardown()
+            
+            # Post success comment
+            comment = "## 🤖 Autonomous Code Review Success\\n\\nI have successfully applied and tested fixes for the discovered issues. The commits have been pushed to your branch."
+            if job.pr_number:
+                GitActionsService.post_pr_comment(job.repo, job.pr_number, comment)
+                
+        return {"status": "auto_committed"}
 
 # --- Graph Construction ---
 

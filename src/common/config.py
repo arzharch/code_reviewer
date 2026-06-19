@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     """
     
     # Database
-    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/agent_db"
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5433/agent_db"
     
     # Redis
     redis_url: str = "redis://localhost:6379"
