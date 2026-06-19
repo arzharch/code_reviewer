@@ -38,7 +38,6 @@ MANIFEST
 *.swo
 
 # Project specific
-alembic.ini
 # But keep the alembic directory
 !alembic/
 
