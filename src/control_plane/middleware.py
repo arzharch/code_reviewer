@@ -1,7 +1,6 @@
 import hmac
 import hashlib
-import json
-from fastapi import Request, HTTPException
+from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 import redis.asyncio as redis

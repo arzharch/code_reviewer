@@ -1,4 +1,3 @@
-import asyncio
 from fastapi import FastAPI, Request, BackgroundTasks
 from .middleware import GitHubSignatureMiddleware, IdempotencyMiddleware, RateLimitMiddleware
 from src.common.config import settings

@@ -1,10 +1,6 @@
-import os
-import json
 import subprocess
 from pathlib import Path
-from typing import Optional, List, Tuple
 from src.agent.state import ProjectProfile
-from src.common.config import settings
 
 class IngestionService:
     """

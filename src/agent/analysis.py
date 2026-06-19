@@ -1,7 +1,7 @@
 import subprocess
 import json
 import os
-from typing import List, Tuple
+from typing import List, Optional
 from pathlib import Path
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -13,18 +13,22 @@ class StaticAnalysisService:
     Wraps local static analysis tools (Ruff, MyPy, Bandit) to generate Findings.
     """
 
-    @staticmethod
-    def run_ruff(repo_path: str, diff_files: List[str] = None) -> List[Finding]:
+    def __init__(self, repo_path: str, diff_files: Optional[List[str]] = None):
+        self.repo_path = repo_path
+        self.diff_files = diff_files or []
+
+    def run_ruff(self, diff_files: Optional[List[str]] = None) -> List[Finding]:
         """
         Runs Ruff (linter) on the given files and parses the JSON output into Findings.
         """
+        target_files = diff_files or self.diff_files
         cmd = ["ruff", "check", "--output-format", "json"]
-        if diff_files:
-            cmd.extend(diff_files)
+        if target_files:
+            cmd.extend(target_files)
         else:
             cmd.append(".")
 
-        result = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True)
+        result = subprocess.run(cmd, cwd=self.repo_path, capture_output=True, text=True)
         findings = []
         
         try:
@@ -35,8 +39,8 @@ class StaticAnalysisService:
                 for issue in issues:
                     file_path = issue.get("filename", "")
                     # Convert absolute path to relative if possible
-                    if file_path.startswith(repo_path):
-                        file_path = os.path.relpath(file_path, repo_path)
+                    if file_path.startswith(self.repo_path):
+                        file_path = os.path.relpath(file_path, self.repo_path)
                         
                     findings.append(Finding(
                         id=f"ruff_{issue.get('code', 'unknown')}_{hash(file_path + str(issue.get('location', {}).get('row')))}",
@@ -52,15 +56,14 @@ class StaticAnalysisService:
             
         return findings
 
-    @staticmethod
-    def run_bandit(repo_path: str, diff_files: List[str] = None) -> List[Finding]:
+    def run_bandit(self, diff_files: Optional[List[str]] = None) -> List[Finding]:
         """
         Runs Bandit (security scanner) and parses output.
         """
         cmd = ["bandit", "-f", "json", "-r", "."]
         # In a real setup, we would filter to diff_files if provided
         
-        result = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True)
+        result = subprocess.run(cmd, cwd=self.repo_path, capture_output=True, text=True)
         findings = []
         
         try:
@@ -70,7 +73,7 @@ class StaticAnalysisService:
                     findings.append(Finding(
                         id=f"bandit_{issue.get('test_id', 'unknown')}_{hash(issue.get('filename') + str(issue.get('line_number')))}",
                         tool="bandit",
-                        file=issue.get("filename", "").replace(repo_path + "/", ""),
+                        file=issue.get("filename", "").replace(self.repo_path + "/", ""),
                         line_range=(issue.get("line_number", 0), issue.get("line_number", 0)),
                         severity=issue.get("issue_severity", "LOW").lower(),
                         category="security",
@@ -81,14 +84,13 @@ class StaticAnalysisService:
 
         return findings
 
-    @staticmethod
-    def run_mypy(repo_path: str, diff_files: List[str] = None) -> List[Finding]:
+    def run_mypy(self, diff_files: Optional[List[str]] = None) -> List[Finding]:
         """
         Runs MyPy (type checker) and parses output.
         """
         # A simple non-json output parsing for mypy
         cmd = ["mypy", ".", "--show-error-codes"]
-        result = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True)
+        result = subprocess.run(cmd, cwd=self.repo_path, capture_output=True, text=True)
         findings = []
         
         if result.stdout.strip():
@@ -112,15 +114,14 @@ class StaticAnalysisService:
                         pass
         return findings
 
-    @staticmethod
-    def run_all(repo_path: str, diff_files: List[str] = None) -> List[Finding]:
+    def run_all(self, diff_files: Optional[List[str]] = None) -> List[Finding]:
         """
         Aggregates findings from all configured tools.
         """
         findings = []
-        findings.extend(StaticAnalysisService.run_ruff(repo_path, diff_files))
-        findings.extend(StaticAnalysisService.run_bandit(repo_path, diff_files))
-        findings.extend(StaticAnalysisService.run_mypy(repo_path, diff_files))
+        findings.extend(self.run_ruff(diff_files))
+        findings.extend(self.run_bandit(diff_files))
+        findings.extend(self.run_mypy(diff_files))
         return findings
 
 class LLMAnalysisService:
@@ -129,21 +130,22 @@ class LLMAnalysisService:
     and identify architectural anti-patterns that static linters miss.
     """
     
-    @staticmethod
-    def run_semantic_analysis(repo_path: str, diff_files: List[str] = None) -> List[Finding]:
-        api_key = settings.openai_api_key.get_secret_value() if settings.openai_api_key else None
-        if not api_key or not diff_files:
-            return []
-
-        llm = ChatOpenAI(
-            api_key=api_key,
-            model=settings.openai_model,
-            temperature=0.0
+    def __init__(self, repo_path: str, diff_files: Optional[List[str]] = None):
+        self.repo_path = repo_path
+        self.diff_files = diff_files or []
+        self.llm = ChatOpenAI(
+            model="gpt-4o-mini",
+            api_key=settings.openai_api_key.get_secret_value() if settings.openai_api_key else None, # type: ignore
+            temperature=0
         )
+
+    def run_semantic_analysis(self) -> List[Finding]:
+        if not self.diff_files:
+            return []
 
         prompt = ChatPromptTemplate.from_messages([
             ("system", "You are an expert software architect. Analyze the following code snippet for deep semantic bugs, security flaws, or architectural anti-patterns. If you find any, return a JSON array of objects with 'description', 'severity' (warning/error/critical), and 'line_number'. If none, return an empty array []"),
-            ("human", "File: {file_path}\\n\\nCode:\\n{code}")
+            ("human", "File: {file_path}\n\nCode:\n{code}")
         ])
 
         findings = []

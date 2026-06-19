@@ -1,5 +1,5 @@
-from typing import Dict, Any
 from src.agent.state import RiskAssessment, TestResult, Proposal
+from typing import Literal
 
 class RiskEngine:
     def __init__(self, auto_commit_threshold: float = 0.15):
@@ -68,6 +68,7 @@ class RiskEngine:
         }
 
         reasons = []
+        decision: Literal["auto_commit", "escalate"]
         if risk_score > self.auto_commit_threshold:
             decision = "escalate"
             reasons.append(f"Risk score ({risk_score:.3f}) exceeds auto-commit threshold ({self.auto_commit_threshold}).")

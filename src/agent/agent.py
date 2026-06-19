@@ -1,8 +1,8 @@
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
-from src.agent.state import AgentState, ProjectProfile, Proposal, TestResult, RiskAssessment
+from src.agent.state import AgentState, Proposal, TestResult, ProjectProfile
 from src.agent.risk_engine import RiskEngine
 from src.common.config import settings
 from src.agent.ingestion import IngestionService
@@ -26,13 +26,18 @@ def static_analysis(state: AgentState) -> Dict[str, Any]:
     """Runs local static analysis tools (Ruff, MyPy, Bandit) and populates findings."""
     repo = state["job"].repo
     diff_files = state.get("diff_files", [])
-    findings = StaticAnalysisService.run_all(repo, diff_files)
+    
+    static_service = StaticAnalysisService(repo_path=repo, diff_files=diff_files)
+    findings = static_service.run_all()
     
     # Also run LLM semantic analysis
-    semantic_findings = LLMAnalysisService.run_semantic_analysis(repo, diff_files)
+    semantic_service = LLMAnalysisService(repo_path=repo, diff_files=diff_files)
+    semantic_findings = semantic_service.run_semantic_analysis()
     findings.extend(semantic_findings)
     
     return {"findings": findings}
+
+
 
 def plan_fixes(state: AgentState) -> Dict[str, Any]:
     """Uses LLM to draft Proposals for each Finding."""
@@ -43,7 +48,7 @@ def plan_fixes(state: AgentState) -> Dict[str, Any]:
         return {"status": "failed"}
 
     llm = ChatOpenAI(
-        api_key=api_key,
+        api_key=api_key, # type: ignore
         model=settings.openai_model,
         temperature=0.0
     ).with_structured_output(Proposal)

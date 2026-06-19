@@ -1,7 +1,7 @@
 import subprocess
 import requests
-from typing import List, Optional
-from src.agent.state import RiskAssessment, Proposal
+from typing import List
+from src.agent.state import Proposal
 from src.common.config import settings
 
 class GitActionsService:

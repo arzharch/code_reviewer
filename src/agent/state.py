@@ -1,4 +1,4 @@
-from typing import List, Dict, Literal, Tuple, Optional, Any
+from typing import List, Dict, Literal, Tuple, Optional
 from pydantic import BaseModel
 from typing_extensions import TypedDict
 import uuid
@@ -27,15 +27,16 @@ class Finding(BaseModel):
 class Proposal(BaseModel):
     finding_id: str
     diff: str
+    description: str
     rationale: str
     confidence: float
 
 class TestResult(BaseModel):
-    proposal_id: str
+    proposal_id: Optional[str] = None
     passed: bool
-    output_excerpt: str
-    duration_s: float
-    coverage_delta: Optional[float] = None
+    output: str
+    duration_s: float = 0.0
+    coverage_percent: float = 0.0
 
 class RiskAssessment(BaseModel):
     proposal_id: str
@@ -45,10 +46,11 @@ class RiskAssessment(BaseModel):
     reasons: List[str]
 
 class ReviewJob(BaseModel):
-    job_id: str = str(uuid.uuid4())
+    id: str = str(uuid.uuid4())
     repo: str
     pr_number: Optional[int] = None
     commit_sha: Optional[str] = None
+    branch: Optional[str] = None
 
 class AgentState(TypedDict):
     job: ReviewJob

@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     github_app_id: Optional[str] = None
     github_private_key: Optional[SecretStr] = None
     github_webhook_secret: Optional[SecretStr] = None
+    github_token: Optional[SecretStr] = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

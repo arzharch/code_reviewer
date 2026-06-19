@@ -1,10 +1,10 @@
 import subprocess
+import shlex
 import tempfile
 import os
 import shutil
-from typing import List, Tuple, Optional
+from typing import List
 from src.agent.state import Proposal, TestResult, ProjectProfile
-from src.common.config import settings
 
 class SandboxExecutionError(Exception):
     pass
@@ -95,11 +95,12 @@ class SandboxRuntime:
             )
 
         try:
-            # We use shell=True because test_command might be "uv run pytest" etc.
+            # Safely split command instead of using shell=True
+            args = shlex.split(cmd)
             result = subprocess.run(
-                cmd,
+                args,
                 cwd=self.sandbox_dir,
-                shell=True,
+                shell=False,
                 capture_output=True,
                 text=True,
                 timeout=300 # 5 min timeout
