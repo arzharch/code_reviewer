@@ -2,11 +2,12 @@ from typing import Dict, Any, List
 from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
-from src.agent.state import AgentState, ProjectProfile, Proposal
+from src.agent.state import AgentState, ProjectProfile, Proposal, TestResult, RiskAssessment
 from src.agent.risk_engine import RiskEngine
 from src.common.config import settings
 from src.agent.ingestion import IngestionService
 from src.agent.analysis import StaticAnalysisService, LLMAnalysisService
+from src.execution_plane.sandbox import SandboxRuntime
 
 # --- Stub Tool / Node Functions for Sprint 2 ---
 
@@ -68,13 +69,53 @@ def plan_fixes(state: AgentState) -> Dict[str, Any]:
 
 def apply_in_sandbox_and_test(state: AgentState) -> Dict[str, Any]:
     """Applies patches and runs tests securely."""
-    return {"status": "running"}
+    repo = state["job"].repo
+    profile = state["profile"]
+    proposals = state.get("proposals", [])
+    
+    sandbox = SandboxRuntime(repo)
+    try:
+        sandbox.setup()
+        applied = sandbox.apply_proposals(proposals)
+        
+        # If applied successfully, run tests
+        if applied:
+            test_result = sandbox.run_tests(profile)
+        else:
+            test_result = TestResult(
+                passed=False,
+                coverage_percent=0.0,
+                output="Failed to apply one or more patches to the repository."
+            )
+            
+        return {"test_results": [test_result]}
+    finally:
+        sandbox.teardown()
 
 def risk_score(state: AgentState) -> Dict[str, Any]:
     """Evaluates the risk of the proposals based on test results and metrics."""
     engine = RiskEngine(auto_commit_threshold=0.15)
-    # TODO: loop over proposals and test results to calculate RiskAssessments
-    return {"status": "running"}
+    proposals = state.get("proposals", [])
+    test_results = state.get("test_results", [])
+    
+    # We only have one aggregated test result for the whole branch right now
+    combined_test_result = test_results[-1] if test_results else TestResult(passed=False, coverage_percent=0.0, output="No tests run")
+    
+    assessments = []
+    for prop in proposals:
+        # Mocking some metrics that would normally be fetched from Git history or AST
+        assessment = engine.calculate_risk(
+            proposal=prop,
+            test_result=combined_test_result,
+            file_criticality_score=0.1,  # e.g., setup.py is 1.0, src is 0.5, docs is 0.0
+            blast_radius_normalized=0.2, # % of files modified or dependent
+            static_analysis_severity_normalized=0.0,
+            historical_revert_rate=0.05,
+            semantic_risk_flag=0.0
+        )
+        assessments.append(assessment)
+        
+    return {"risk_assessments": assessments}
 
 def aggregate_and_decide(state: AgentState) -> Dict[str, Any]:
     """Decides to auto-commit or escalate based on risk assessments."""
