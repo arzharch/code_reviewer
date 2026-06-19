@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request
 from .middleware import GitHubSignatureMiddleware, IdempotencyMiddleware, RateLimitMiddleware
-import os
+from src.common.config import settings
 
 app = FastAPI(
     title="Autonomous Code Reviewer - Control Plane",
@@ -14,7 +14,7 @@ app.add_middleware(RateLimitMiddleware, rate_limit=100, window=60)
 app.add_middleware(IdempotencyMiddleware)
 app.add_middleware(
     GitHubSignatureMiddleware, 
-    secret=os.getenv("GITHUB_WEBHOOK_SECRET", "")
+    secret=settings.github_webhook_secret.get_secret_value() if settings.github_webhook_secret else ""
 )
 
 @app.post("/webhook")

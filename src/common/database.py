@@ -3,15 +3,14 @@ from sqlalchemy.orm import declarative_base
 from contextlib import asynccontextmanager
 import os
 
+from .config import settings
+
 # Base class for SQLAlchemy models
 Base = declarative_base()
 
-# Retrieve the database URL from environment variables, default to a local postgres instance
+# Retrieve the database URL from settings
 # We use asyncpg for async connection pooling
-DATABASE_URL = os.getenv(
-    "DATABASE_URL", 
-    "postgresql+asyncpg://postgres:postgres@localhost:5432/agent_db"
-)
+DATABASE_URL = settings.database_url
 
 # Create an asynchronous engine with connection pooling
 # pool_size and max_overflow help make the DB robust under bursty load

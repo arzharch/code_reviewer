@@ -5,11 +5,10 @@ from fastapi import Request, HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 import redis.asyncio as redis
-import os
+from src.common.config import settings
 
 # Initialize Redis connection for rate limiting and idempotency
-redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-redis_client = redis.from_url(redis_url)
+redis_client = redis.from_url(settings.redis_url)
 
 class GitHubSignatureMiddleware(BaseHTTPMiddleware):
     """
