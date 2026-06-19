@@ -53,6 +53,7 @@ class ReviewJob(BaseModel):
 class AgentState(TypedDict):
     job: ReviewJob
     profile: ProjectProfile
+    diff_files: List[str]
     findings: List[Finding]
     proposals: List[Proposal]
     test_results: List[TestResult]

@@ -5,16 +5,32 @@ from langchain_core.prompts import ChatPromptTemplate
 from src.agent.state import AgentState, ProjectProfile, Proposal
 from src.agent.risk_engine import RiskEngine
 from src.common.config import settings
+from src.agent.ingestion import IngestionService
+from src.agent.analysis import StaticAnalysisService, LLMAnalysisService
 
 # --- Stub Tool / Node Functions for Sprint 2 ---
 
 def ingest_and_detect(state: AgentState) -> Dict[str, Any]:
     """Detects framework and tests commands."""
-    return {"status": "running"}
+    repo = state["job"].repo
+    profile = IngestionService.detect_project_profile(repo)
+    # For local CLI jobs we just use local diff
+    diff_text = IngestionService.get_local_diff(repo)
+    # Extremely basic diff parsing to get modified files
+    diff_files = [line.split(" b/")[1] for line in diff_text.splitlines() if line.startswith("diff --git a/")]
+    return {"profile": profile, "diff_files": diff_files}
 
 def static_analysis(state: AgentState) -> Dict[str, Any]:
     """Runs local static analysis tools (Ruff, MyPy, Bandit) and populates findings."""
-    return {"status": "running"}
+    repo = state["job"].repo
+    diff_files = state.get("diff_files", [])
+    findings = StaticAnalysisService.run_all(repo, diff_files)
+    
+    # Also run LLM semantic analysis
+    semantic_findings = LLMAnalysisService.run_semantic_analysis(repo, diff_files)
+    findings.extend(semantic_findings)
+    
+    return {"findings": findings}
 
 def plan_fixes(state: AgentState) -> Dict[str, Any]:
     """Uses LLM to draft Proposals for each Finding."""
