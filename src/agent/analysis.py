@@ -28,7 +28,12 @@ class StaticAnalysisService:
         else:
             cmd.append(".")
 
-        result = subprocess.run(cmd, cwd=self.repo_path, capture_output=True, text=True)
+        try:
+            result = subprocess.run(cmd, cwd=self.repo_path, capture_output=True, text=True)
+        except FileNotFoundError:
+            print("Ruff not found. Skipping static analysis with ruff.")
+            return []
+        
         findings = []
         
         try:
@@ -63,7 +68,12 @@ class StaticAnalysisService:
         cmd = ["bandit", "-f", "json", "-r", "."]
         # In a real setup, we would filter to diff_files if provided
         
-        result = subprocess.run(cmd, cwd=self.repo_path, capture_output=True, text=True)
+        try:
+            result = subprocess.run(cmd, cwd=self.repo_path, capture_output=True, text=True)
+        except FileNotFoundError:
+            print("Bandit not found. Skipping security scan.")
+            return []
+            
         findings = []
         
         try:
@@ -90,7 +100,12 @@ class StaticAnalysisService:
         """
         # A simple non-json output parsing for mypy
         cmd = ["mypy", ".", "--show-error-codes"]
-        result = subprocess.run(cmd, cwd=self.repo_path, capture_output=True, text=True)
+        try:
+            result = subprocess.run(cmd, cwd=self.repo_path, capture_output=True, text=True)
+        except FileNotFoundError:
+            print("MyPy not found. Skipping type check.")
+            return []
+            
         findings = []
         
         if result.stdout.strip():
@@ -130,9 +145,11 @@ class LLMAnalysisService:
     and identify architectural anti-patterns that static linters miss.
     """
     
-    def __init__(self, repo_path: str, diff_files: Optional[List[str]] = None):
+    def __init__(self, repo_path: str, diff_files: Optional[List[str]] = None, token_limit: Optional[int] = None):
         self.repo_path = repo_path
         self.diff_files = diff_files or []
+        self.token_limit = token_limit
+        self.original_token_limit = token_limit
         self.llm = ChatOpenAI(
             model="gpt-4o-mini",
             api_key=settings.openai_api_key.get_secret_value() if settings.openai_api_key else None, # type: ignore
@@ -149,8 +166,10 @@ class LLMAnalysisService:
         ])
 
         findings = []
-        for file_path in diff_files:
-            full_path = Path(repo_path) / file_path
+        total_tokens_used = 0
+
+        for file_path in self.diff_files:
+            full_path = Path(self.repo_path) / file_path
             if full_path.exists() and full_path.is_file() and full_path.suffix in [".py", ".ts", ".js", ".go", ".rs"]:
                 try:
                     code_content = full_path.read_text(encoding="utf-8")
@@ -158,12 +177,29 @@ class LLMAnalysisService:
                     if len(code_content) > 10000:
                         code_content = code_content[:10000]
                         
-                    chain = prompt | llm
+                    estimated_tokens = len(code_content) // 4
+                    if self.token_limit and self.original_token_limit and (total_tokens_used + estimated_tokens) > self.token_limit:
+                        ans = input(f"\n[LLM Limit] Token limit of {self.token_limit} reached (used ~{total_tokens_used}). Continue scanning for another {self.original_token_limit} tokens? (y/n): ")
+                        if ans.strip().lower() != 'y':
+                            print(f"Stopping LLM analysis. Returning {len(findings)} findings gathered so far.")
+                            break
+                        else:
+                            # Bump limit by the original amount
+                            self.token_limit += self.original_token_limit
+                        
+                    chain = prompt | self.llm
                     response = chain.invoke({"file_path": file_path, "code": code_content})
+                    total_tokens_used += estimated_tokens
                     
                     try:
                         # Very naive parse of the LLM response
-                        data = json.loads(response.content)
+                        content = response.content.strip()
+                        if content.startswith("```json"):
+                            content = content[7:-3].strip()
+                        elif content.startswith("```"):
+                            content = content[3:-3].strip()
+                        
+                        data = json.loads(content)
                         for issue in data:
                             findings.append(Finding(
                                 id=f"llm_ast_{hash(file_path + str(issue.get('line_number')))}",
