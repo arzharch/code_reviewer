@@ -51,6 +51,8 @@ class ReviewJob(BaseModel):
     pr_number: Optional[int] = None
     commit_sha: Optional[str] = None
     branch: Optional[str] = None
+    evaluate_entire_codebase: bool = False
+    token_limit: Optional[int] = None
 
 class AgentState(TypedDict):
     job: ReviewJob

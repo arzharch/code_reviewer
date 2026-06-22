@@ -1,11 +1,23 @@
 import subprocess
 from pathlib import Path
+from typing import List
 from src.agent.state import ProjectProfile
 
 class IngestionService:
     """
     Handles fetching diffs and detecting project parameters (language, framework, test commands).
     """
+
+    @staticmethod
+    def get_all_tracked_files(repo_path: str) -> List[str]:
+        """
+        Fetches all files currently tracked by Git.
+        """
+        cmd = ["git", "ls-files"]
+        result = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"Git ls-files failed: {result.stderr}")
+        return [f for f in result.stdout.splitlines() if f.strip()]
 
     @staticmethod
     def get_local_diff(repo_path: str, staged: bool = False) -> str:

@@ -16,10 +16,15 @@ def ingest_and_detect(state: AgentState) -> Dict[str, Any]:
     """Detects framework and tests commands."""
     repo = state["job"].repo
     profile = IngestionService.detect_project_profile(repo)
-    # For local CLI jobs we just use local diff
-    diff_text = IngestionService.get_local_diff(repo)
-    # Extremely basic diff parsing to get modified files
-    diff_files = [line.split(" b/")[1] for line in diff_text.splitlines() if line.startswith("diff --git a/")]
+    
+    if state["job"].evaluate_entire_codebase:
+        diff_files = IngestionService.get_all_tracked_files(repo)
+    else:
+        # For local CLI jobs we just use local diff
+        diff_text = IngestionService.get_local_diff(repo)
+        # Extremely basic diff parsing to get modified files
+        diff_files = [line.split(" b/")[1] for line in diff_text.splitlines() if line.startswith("diff --git a/")]
+        
     return {"profile": profile, "diff_files": diff_files}
 
 def static_analysis(state: AgentState) -> Dict[str, Any]:
@@ -31,7 +36,11 @@ def static_analysis(state: AgentState) -> Dict[str, Any]:
     findings = static_service.run_all()
     
     # Also run LLM semantic analysis
-    semantic_service = LLMAnalysisService(repo_path=repo, diff_files=diff_files)
+    semantic_service = LLMAnalysisService(
+        repo_path=repo, 
+        diff_files=diff_files, 
+        token_limit=state["job"].token_limit
+    )
     semantic_findings = semantic_service.run_semantic_analysis()
     findings.extend(semantic_findings)
     
