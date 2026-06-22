@@ -79,3 +79,12 @@ async def health_check():
     Basic health check endpoint for orchestration/KEDA.
     """
     return {"status": "healthy"}
+
+@app.get("/unsafe_query")
+async def unsafe_query(user_id: str):
+    """
+    Vulnerable endpoint for testing LLM analysis.
+    """
+    # Simulate executing a raw SQL query with an f-string (SQL Injection)
+    query = f"SELECT * FROM users WHERE id = '{user_id}'"
+    return {"query_executed": query}
