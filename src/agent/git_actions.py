@@ -19,11 +19,13 @@ class GitActionsService:
         Uses App Auth if configured, otherwise falls back to PAT.
         """
         if installation_id and settings.github_app_id and settings.github_private_key:
+            from github import GithubIntegration
             auth = Auth.AppAuth(
                 int(settings.github_app_id),
                 settings.github_private_key.get_secret_value()
-            ).get_installation_auth(installation_id)
-            return Github(auth=auth)
+            )
+            gi = GithubIntegration(auth=auth)
+            return gi.get_github_for_installation(installation_id)
         
         token = settings.github_token.get_secret_value() if settings.github_token else None
         if token:
@@ -36,16 +38,18 @@ class GitActionsService:
     def get_token_string(installation_id: Optional[int] = None) -> str:
         """Helper to get the raw token string for git clone / requests."""
         if installation_id and settings.github_app_id and settings.github_private_key:
+            from github import GithubIntegration
             auth = Auth.AppAuth(
                 int(settings.github_app_id),
                 settings.github_private_key.get_secret_value()
-            ).get_installation_auth(installation_id)
-            return auth.token
+            )
+            gi = GithubIntegration(auth=auth)
+            return gi.get_access_token(installation_id).token
             
         return settings.github_token.get_secret_value() if settings.github_token else ""
 
     @staticmethod
-    def clone_and_prep_pr(repo_full_name: str, pr_number: int, installation_id: Optional[int] = None) -> Tuple[str, str, str, str]:
+    def clone_and_prep_pr(repo_full_name: str, pr_number: int, clone_url: str, installation_id: Optional[int] = None) -> Tuple[str, str, str, str]:
         """
         Clones the PR head branch into a temporary directory and fetches the PR diff.
         Returns: (temp_dir_path, diff_content, head_sha, base_sha)
@@ -57,14 +61,13 @@ class GitActionsService:
         token = GitActionsService.get_token_string(installation_id)
         
         # 1. Fetch Diff via GitHub API
-        headers = {"Authorization": f"Bearer {token}"}
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
         diff_resp = requests.get(pr.diff_url, headers=headers)
         diff_resp.raise_for_status()
         diff_content = diff_resp.text
         
         # 2. Clone Repository securely
-        clone_url = pr.base.repo.clone_url
-        auth_clone_url = clone_url.replace("https://", f"https://x-access-token:{token}@")
+        auth_clone_url = clone_url.replace("https://", f"https://x-access-token:{token}@") if token else clone_url
         
         temp_dir = tempfile.mkdtemp(prefix="agent_workspace_")
         

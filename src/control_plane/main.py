@@ -38,9 +38,19 @@ async def run_agent_workflow(job: ReviewJob, payload: dict):
             return
             
         print(f"Preparing workspace for {repo_full_name} PR #{job.pr_number}")
+        
+        # Post initial status comment
+        GitActionsService.post_pr_comment(
+            repo_full_name=repo_full_name,
+            pr_number=job.pr_number,
+            comment="**Autonomous Code Reviewer**: I've received your pull request and am currently analyzing the code. I'll report back shortly!",
+            installation_id=job.installation_id
+        )
+        
         temp_dir, diff_content, head_sha, base_sha = GitActionsService.clone_and_prep_pr(
             repo_full_name=repo_full_name,
             pr_number=job.pr_number,
+            clone_url=job.repo,
             installation_id=job.installation_id
         )
         
