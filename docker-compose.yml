@@ -44,7 +44,7 @@ services:
     environment:
       # Override the local DB/Redis URLs to point to Docker containers
       - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=postgresql+psycopg://postgres:postgres@postgres:5432/agent_db
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/agent_db
     depends_on:
       postgres:
         condition: service_healthy
