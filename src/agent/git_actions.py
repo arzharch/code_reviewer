@@ -3,7 +3,6 @@ import requests
 import tempfile
 import os
 from typing import List, Optional, Tuple
-from github import Github, Auth
 from src.agent.state import Proposal
 from src.common.config import settings
 

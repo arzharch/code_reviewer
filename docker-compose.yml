@@ -34,6 +34,24 @@ services:
       timeout: 3s
       retries: 5
 
+  api:
+    build: .
+    container_name: agent_api
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    environment:
+      # Override the local DB/Redis URLs to point to Docker containers
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+psycopg://postgres:postgres@postgres:5432/agent_db
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   agent_pgdata_new:
   redisdata:
