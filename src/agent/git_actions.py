@@ -45,36 +45,44 @@ class GitActionsService:
         return settings.github_token.get_secret_value() if settings.github_token else ""
 
     @staticmethod
-    def clone_and_prep_pr(repo_full_name: str, pr_number: int, installation_id: Optional[int] = None) -> Tuple[str, str, str, str]:
+    def clone_and_prep_pr(repo_full_name: str, pr_number: int, clone_url: str, installation_id: Optional[int] = None) -> Tuple[str, str, str, str]:
         """
         Clones the PR head branch into a temporary directory and fetches the PR diff.
         Returns: (temp_dir_path, diff_content, head_sha, base_sha)
         """
-        gh = GitActionsService.get_github_client(installation_id)
-        repo = gh.get_repo(repo_full_name)
-        pr = repo.get_pull(pr_number)
-        
         token = GitActionsService.get_token_string(installation_id)
         
-        # 1. Fetch Diff via GitHub API
-        headers = {"Authorization": f"Bearer {token}"}
-        diff_resp = requests.get(pr.diff_url, headers=headers)
+        # 1. Fetch Diff via GitHub API manually to avoid PyGithub lazy loading bugs
+        api_url = f"https://api.github.com/repos/{repo_full_name}/pulls/{pr_number}"
+        
+        # Get the unified diff
+        diff_headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github.v3.diff"} if token else {"Accept": "application/vnd.github.v3.diff"}
+        diff_resp = requests.get(api_url, headers=diff_headers)
         diff_resp.raise_for_status()
         diff_content = diff_resp.text
         
+        # Get the PR JSON to extract shas
+        json_headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github.v3+json"} if token else {"Accept": "application/vnd.github.v3+json"}
+        pr_resp = requests.get(api_url, headers=json_headers)
+        pr_resp.raise_for_status()
+        pr_data = pr_resp.json()
+        
+        head_sha = pr_data["head"]["sha"]
+        head_ref = pr_data["head"]["ref"]
+        base_sha = pr_data["base"]["sha"]
+        
         # 2. Clone Repository securely
-        clone_url = pr.base.repo.clone_url
-        auth_clone_url = clone_url.replace("https://", f"https://x-access-token:{token}@")
+        auth_clone_url = clone_url.replace("https://", f"https://x-access-token:{token}@") if token else clone_url
         
         temp_dir = tempfile.mkdtemp(prefix="agent_workspace_")
         
-        print(f"Cloning {repo_full_name} branch {pr.head.ref} into {temp_dir}...")
+        print(f"Cloning {repo_full_name} branch {head_ref} into {temp_dir}...")
         subprocess.run(
-            ["git", "clone", "--depth", "1", "--branch", pr.head.ref, auth_clone_url, temp_dir],
+            ["git", "clone", "--depth", "1", "--branch", head_ref, auth_clone_url, temp_dir],
             check=True, capture_output=True
         )
         
-        return temp_dir, diff_content, pr.head.sha, pr.base.sha
+        return temp_dir, diff_content, head_sha, base_sha
 
     @staticmethod
     def post_pr_comment(repo_full_name: str, pr_number: int, comment: str, installation_id: Optional[int] = None) -> bool:
