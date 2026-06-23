@@ -13,34 +13,33 @@ class GitActionsService:
     """
 
     @staticmethod
-    def get_github_client(installation_id: Optional[int] = None) -> Github:
-        """
-        Returns an authenticated PyGithub client.
-        Uses App Auth if configured, otherwise falls back to PAT.
-        """
-        if installation_id and settings.github_app_id and settings.github_private_key:
-            auth = Auth.AppAuth(
-                int(settings.github_app_id),
-                settings.github_private_key.get_secret_value()
-            ).get_installation_auth(installation_id)
-            return Github(auth=auth)
-        
-        token = settings.github_token.get_secret_value() if settings.github_token else None
-        if token:
-            auth = Auth.Token(token)
-            return Github(auth=auth)
-            
-        raise ValueError("No GitHub credentials configured")
-
-    @staticmethod
     def get_token_string(installation_id: Optional[int] = None) -> str:
         """Helper to get the raw token string for git clone / requests."""
         if installation_id and settings.github_app_id and settings.github_private_key:
-            auth = Auth.AppAuth(
-                int(settings.github_app_id),
-                settings.github_private_key.get_secret_value()
-            ).get_installation_auth(installation_id)
-            return auth.token
+            import jwt
+            import time
+            
+            payload = {
+                "iat": int(time.time()) - 60,
+                "exp": int(time.time()) + (10 * 60),
+                "iss": str(settings.github_app_id)
+            }
+            
+            encoded_jwt = jwt.encode(
+                payload, 
+                settings.github_private_key.get_secret_value(), 
+                algorithm="RS256"
+            )
+            
+            url = f"https://api.github.com/app/installations/{installation_id}/access_tokens"
+            headers = {
+                "Authorization": f"Bearer {encoded_jwt}",
+                "Accept": "application/vnd.github.v3+json"
+            }
+            
+            resp = requests.post(url, headers=headers)
+            resp.raise_for_status()
+            return resp.json()["token"]
             
         return settings.github_token.get_secret_value() if settings.github_token else ""
 
@@ -87,13 +86,21 @@ class GitActionsService:
     @staticmethod
     def post_pr_comment(repo_full_name: str, pr_number: int, comment: str, installation_id: Optional[int] = None) -> bool:
         """
-        Posts a comment to a GitHub PR via the PyGithub API.
+        Posts a comment to a GitHub PR via the raw GitHub API.
         """
         try:
-            gh = GitActionsService.get_github_client(installation_id)
-            repo = gh.get_repo(repo_full_name)
-            pr = repo.get_pull(pr_number)
-            pr.create_issue_comment(comment)
+            token = GitActionsService.get_token_string(installation_id)
+            if not token:
+                print("No token available to post comment.")
+                return False
+                
+            url = f"https://api.github.com/repos/{repo_full_name}/issues/{pr_number}/comments"
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github.v3+json"
+            }
+            resp = requests.post(url, headers=headers, json={"body": comment})
+            resp.raise_for_status()
             return True
         except Exception as e:
             print(f"Failed to post comment: {e}")
