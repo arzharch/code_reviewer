@@ -12,3 +12,4 @@ def insecure_deserialization(data):
 
 def bad_typing(a: int) -> int:
     return a + "string"
+
