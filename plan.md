@@ -54,3 +54,9 @@ From the first line of code, this project will incorporate:
 * **Auto-Commit Logic:** Implement the git tool to securely commit and push low-risk fixes back to the PR branch using short-lived tokens.
 * **Escalation & Commenting:** For high-risk findings, post PR review comments with suggestions and a neutral check-run status.
 * **Audit Logging:** Finalize the Postgres audit log table to guarantee tracing of why the bot made specific decisions.
+
+### Phase 2: Interactive PR Reviews (Future)
+**Focus:** Extending the bot to handle conversational feedback on PRs.
+* **Webhook Extensions:** Handle `pull_request_review_comment` and `pull_request_review` events.
+* **Conversational AI:** Parse user comments on the PR thread (e.g., "ignore this", "fix is out", "can you rewrite this?").
+* **State Updates:** Allow the user to override the agent's risk assessment and forcefully auto-commit a fix, or dismiss a finding directly from the GitHub UI by replying to the bot.

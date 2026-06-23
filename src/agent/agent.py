@@ -14,14 +14,19 @@ from src.agent.git_actions import GitActionsService
 
 def ingest_and_detect(state: AgentState) -> Dict[str, Any]:
     """Detects framework and tests commands."""
-    repo = state["job"].repo
+    job = state["job"]
+    repo = job.repo
     profile = IngestionService.detect_project_profile(repo)
     
-    if state["job"].evaluate_entire_codebase:
+    if job.evaluate_entire_codebase:
         diff_files = IngestionService.get_all_tracked_files(repo)
     else:
-        # For local CLI jobs we just use local diff
-        diff_text = IngestionService.get_local_diff(repo)
+        if job.raw_diff:
+            diff_text = job.raw_diff
+        else:
+            # For local CLI jobs we just use local diff
+            diff_text = IngestionService.get_local_diff(repo)
+        
         # Extremely basic diff parsing to get modified files
         diff_files = [line.split(" b/")[1] for line in diff_text.splitlines() if line.startswith("diff --git a/")]
         
@@ -112,21 +117,46 @@ def risk_score(state: AgentState) -> Dict[str, Any]:
     engine = RiskEngine(auto_commit_threshold=0.15)
     proposals = state.get("proposals", [])
     test_results = state.get("test_results", [])
+    findings = state.get("findings", [])
+    diff_files = state.get("diff_files", [])
     
     # We only have one aggregated test result for the whole branch right now
     combined_test_result = test_results[-1] if test_results else TestResult(passed=False, coverage_percent=0.0, output="No tests run")
     
+    blast_radius = min(1.0, len(diff_files) / 10.0) if diff_files else 0.1
+    
     assessments = []
     for prop in proposals:
-        # Mocking some metrics that would normally be fetched from Git history or AST
+        finding = next((f for f in findings if f.id == prop.finding_id), None)
+        file_criticality = 0.5
+        semantic_risk = 0.0
+        static_severity = 0.0
+        
+        if finding:
+            file_name = finding.file.lower()
+            if "setup.py" in file_name or "main.py" in file_name or ".env" in file_name:
+                file_criticality = 0.9
+            elif "test" in file_name:
+                file_criticality = 0.1
+                
+            if finding.severity == "critical":
+                static_severity = 1.0
+                semantic_risk = 1.0
+            elif finding.severity == "error":
+                static_severity = 0.8
+                semantic_risk = 0.8
+            elif finding.severity == "warning":
+                static_severity = 0.4
+                semantic_risk = 0.4
+                
         assessment = engine.calculate_risk(
             proposal=prop,
             test_result=combined_test_result,
-            file_criticality_score=0.1,  # e.g., setup.py is 1.0, src is 0.5, docs is 0.0
-            blast_radius_normalized=0.2, # % of files modified or dependent
-            static_analysis_severity_normalized=0.0,
-            historical_revert_rate=0.05,
-            semantic_risk_flag=0.0
+            file_criticality_score=file_criticality,
+            blast_radius_normalized=blast_radius,
+            static_analysis_severity_normalized=static_severity,
+            historical_revert_rate=0.0,
+            semantic_risk_flag=semantic_risk
         )
         assessments.append(assessment)
         
@@ -141,6 +171,9 @@ def aggregate_and_decide(state: AgentState) -> Dict[str, Any]:
     # Check if any assessment requires escalation
     should_escalate = any(a.decision == "escalate" for a in assessments)
     
+    # Determine the repo name to use for comments
+    repo_name_for_api = getattr(job, "repo_full_name", None) or job.repo
+
     if should_escalate:
         # Post comment on PR with the findings and proposals
         comment = "## 🤖 Autonomous Code Review Escalation\\n\\nI found issues but the risk of auto-committing is too high. Please review my proposals:\\n\\n"
@@ -149,8 +182,8 @@ def aggregate_and_decide(state: AgentState) -> Dict[str, Any]:
             comment += f"{p.description}\\n\\n"
             comment += f"```diff\\n{p.diff}\\n```\\n\\n"
             
-        if job.pr_number:
-            GitActionsService.post_pr_comment(job.repo, job.pr_number, comment)
+        if job.pr_number and repo_name_for_api and not str(repo_name_for_api).startswith("C:"):
+            GitActionsService.post_pr_comment(repo_name_for_api, job.pr_number, comment, job.installation_id)
         return {"status": "escalated"}
     else:
         # All safe to auto-commit
@@ -168,8 +201,8 @@ def aggregate_and_decide(state: AgentState) -> Dict[str, Any]:
             
             # Post success comment
             comment = "## 🤖 Autonomous Code Review Success\\n\\nI have successfully applied and tested fixes for the discovered issues. The commits have been pushed to your branch."
-            if job.pr_number:
-                GitActionsService.post_pr_comment(job.repo, job.pr_number, comment)
+            if job.pr_number and repo_name_for_api and not str(repo_name_for_api).startswith("C:"):
+                GitActionsService.post_pr_comment(repo_name_for_api, job.pr_number, comment, job.installation_id)
                 
         return {"status": "auto_committed"}
 

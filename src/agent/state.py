@@ -1,5 +1,5 @@
 from typing import List, Dict, Literal, Tuple, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 import uuid
 
@@ -46,13 +46,16 @@ class RiskAssessment(BaseModel):
     reasons: List[str]
 
 class ReviewJob(BaseModel):
-    id: str = str(uuid.uuid4())
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     repo: str
+    repo_full_name: Optional[str] = None
     pr_number: Optional[int] = None
     commit_sha: Optional[str] = None
     branch: Optional[str] = None
     evaluate_entire_codebase: bool = False
     token_limit: Optional[int] = None
+    installation_id: Optional[int] = None
+    raw_diff: Optional[str] = None
 
 class AgentState(TypedDict):
     job: ReviewJob

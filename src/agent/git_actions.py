@@ -1,6 +1,9 @@
 import subprocess
 import requests
-from typing import List
+import tempfile
+import os
+from typing import List, Optional, Tuple
+from github import Github, Auth
 from src.agent.state import Proposal
 from src.common.config import settings
 
@@ -10,30 +13,82 @@ class GitActionsService:
     """
 
     @staticmethod
-    def post_pr_comment(repo_url: str, pr_number: int, comment: str) -> bool:
+    def get_github_client(installation_id: Optional[int] = None) -> Github:
         """
-        Posts a comment to a GitHub PR via the API.
+        Returns an authenticated PyGithub client.
+        Uses App Auth if configured, otherwise falls back to PAT.
         """
+        if installation_id and settings.github_app_id and settings.github_private_key:
+            auth = Auth.AppAuth(
+                int(settings.github_app_id),
+                settings.github_private_key.get_secret_value()
+            ).get_installation_auth(installation_id)
+            return Github(auth=auth)
+        
         token = settings.github_token.get_secret_value() if settings.github_token else None
-        if not token:
-            print("No GitHub token configured; skipping PR comment.")
-            return False
+        if token:
+            auth = Auth.Token(token)
+            return Github(auth=auth)
             
-        # Very naive repo extraction from github url
-        # e.g. https://github.com/owner/repo
-        repo_path = repo_url.replace("https://github.com/", "").replace(".git", "")
+        raise ValueError("No GitHub credentials configured")
+
+    @staticmethod
+    def get_token_string(installation_id: Optional[int] = None) -> str:
+        """Helper to get the raw token string for git clone / requests."""
+        if installation_id and settings.github_app_id and settings.github_private_key:
+            auth = Auth.AppAuth(
+                int(settings.github_app_id),
+                settings.github_private_key.get_secret_value()
+            ).get_installation_auth(installation_id)
+            return auth.token
+            
+        return settings.github_token.get_secret_value() if settings.github_token else ""
+
+    @staticmethod
+    def clone_and_prep_pr(repo_full_name: str, pr_number: int, installation_id: Optional[int] = None) -> Tuple[str, str, str, str]:
+        """
+        Clones the PR head branch into a temporary directory and fetches the PR diff.
+        Returns: (temp_dir_path, diff_content, head_sha, base_sha)
+        """
+        gh = GitActionsService.get_github_client(installation_id)
+        repo = gh.get_repo(repo_full_name)
+        pr = repo.get_pull(pr_number)
         
-        url = f"https://api.github.com/repos/{repo_path}/issues/{pr_number}/comments"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github.v3+json"
-        }
+        token = GitActionsService.get_token_string(installation_id)
         
-        response = requests.post(url, json={"body": comment}, headers=headers)
-        if response.status_code == 201:
+        # 1. Fetch Diff via GitHub API
+        headers = {"Authorization": f"Bearer {token}"}
+        diff_resp = requests.get(pr.diff_url, headers=headers)
+        diff_resp.raise_for_status()
+        diff_content = diff_resp.text
+        
+        # 2. Clone Repository securely
+        clone_url = pr.base.repo.clone_url
+        auth_clone_url = clone_url.replace("https://", f"https://x-access-token:{token}@")
+        
+        temp_dir = tempfile.mkdtemp(prefix="agent_workspace_")
+        
+        print(f"Cloning {repo_full_name} branch {pr.head.ref} into {temp_dir}...")
+        subprocess.run(
+            ["git", "clone", "--depth", "1", "--branch", pr.head.ref, auth_clone_url, temp_dir],
+            check=True, capture_output=True
+        )
+        
+        return temp_dir, diff_content, pr.head.sha, pr.base.sha
+
+    @staticmethod
+    def post_pr_comment(repo_full_name: str, pr_number: int, comment: str, installation_id: Optional[int] = None) -> bool:
+        """
+        Posts a comment to a GitHub PR via the PyGithub API.
+        """
+        try:
+            gh = GitActionsService.get_github_client(installation_id)
+            repo = gh.get_repo(repo_full_name)
+            pr = repo.get_pull(pr_number)
+            pr.create_issue_comment(comment)
             return True
-        else:
-            print(f"Failed to post comment: {response.text}")
+        except Exception as e:
+            print(f"Failed to post comment: {e}")
             return False
 
     @staticmethod
@@ -47,10 +102,14 @@ class GitActionsService:
             subprocess.run(["git", "add", "."], cwd=repo_path, check=True, capture_output=True)
             
             # Formulate commit message
-            messages = ["Autonomous Code Review Fixes\\n"]
+            messages = ["Autonomous Code Review Fixes\n"]
             for p in proposals:
                 messages.append(f"- Fixed {p.finding_id}: {p.description}")
-            commit_message = "\\n".join(messages)
+            commit_message = "\n".join(messages)
+            
+            # Use basic config for commit if missing
+            subprocess.run(["git", "config", "user.name", "Autonomous Reviewer"], cwd=repo_path, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "bot@autonomous-reviewer.local"], cwd=repo_path, check=True, capture_output=True)
             
             subprocess.run(["git", "commit", "-m", commit_message], cwd=repo_path, check=True, capture_output=True)
             

@@ -15,63 +15,94 @@ app = FastAPI(
 # Note: Middleware order matters. Outer to inner: RateLimit -> Idempotency -> Signature
 app.add_middleware(RateLimitMiddleware, rate_limit=100, window=60)
 app.add_middleware(IdempotencyMiddleware)
-app.add_middleware(
-    GitHubSignatureMiddleware, 
-    secret=settings.github_webhook_secret.get_secret_value() if settings.github_webhook_secret else ""
-)
+if settings.github_webhook_secret:
+    app.add_middleware(
+        GitHubSignatureMiddleware, 
+        secret=settings.github_webhook_secret.get_secret_value()
+    )
+
+import tempfile
+import shutil
+from src.agent.git_actions import GitActionsService
 
 async def run_agent_workflow(job: ReviewJob, payload: dict):
     """
     Background task that executes the LangGraph agent workflow for the incoming PR/push.
     """
-    async with get_checkpointer() as checkpointer:
-        graph = get_compiled_graph(checkpointer=checkpointer)
-        # Unique thread ID per job for checkpointer
-        config = {"configurable": {"thread_id": job.id}}
+    temp_dir = None
+    try:
+        # Clone repo and fetch diff
+        repo_full_name = getattr(job, "repo_full_name", None)
+        if not repo_full_name or not job.pr_number:
+            print("Missing repo name or PR number, aborting workflow.")
+            return
+            
+        print(f"Preparing workspace for {repo_full_name} PR #{job.pr_number}")
+        temp_dir, diff_content, head_sha, base_sha = GitActionsService.clone_and_prep_pr(
+            repo_full_name=repo_full_name,
+            pr_number=job.pr_number,
+            installation_id=job.installation_id
+        )
         
-        # Initial state for the graph
-        initial_state = {
-            "job": job,
-            "findings": [],
-            "proposals": [],
-            "test_results": [],
-            "risk_assessments": []
-        }
+        # Update job to point to local temp workspace and add diff
+        job.repo = temp_dir
+        job.commit_sha = head_sha
+        job.raw_diff = diff_content
         
-        try:
-            # We use ainvoke for asynchronous execution of the graph
+        async with get_checkpointer() as checkpointer:
+            graph = get_compiled_graph(checkpointer=checkpointer)
+            config = {"configurable": {"thread_id": job.id}}
+            
+            initial_state = {
+                "job": job,
+                "findings": [],
+                "proposals": [],
+                "test_results": [],
+                "risk_assessments": []
+            }
+            
             print(f"Starting agent workflow for job {job.id}")
             final_state = await graph.ainvoke(initial_state, config=config)
             print(f"Agent workflow completed for job {job.id}. Final status: {final_state.get('status')}")
-        except Exception as e:
-            print(f"Agent workflow failed for job {job.id}: {e}")
+    except Exception as e:
+        print(f"Agent workflow failed for job {job.id}: {e}")
+    finally:
+        # Clean up the temporary workspace
+        if temp_dir:
+            print(f"Cleaning up workspace {temp_dir}")
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 @app.post("/webhook")
 async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
     payload = await request.json()
     
-    # Example parsing for GitHub PRs
-    pr_number = None
-    branch = None
-    repo_url = payload.get("repository", {}).get("clone_url", "")
-    
+    action = payload.get("action")
     if "pull_request" in payload:
+        if action not in ["opened", "synchronize", "reopened"]:
+            return {"status": "ignored", "reason": f"Action {action} ignored to save credits"}
+            
         pr_number = payload["pull_request"].get("number")
         branch = payload["pull_request"]["head"].get("ref")
+        repo_url = payload.get("repository", {}).get("clone_url", "")
+        repo_full_name = payload.get("repository", {}).get("full_name")
+        installation_id = payload.get("installation", {}).get("id")
         
-    if not repo_url:
-        return {"status": "ignored", "reason": "No repository URL in payload"}
+        if not repo_url or not repo_full_name:
+            return {"status": "ignored", "reason": "No repository info in payload"}
 
-    job = ReviewJob(
-        repo=repo_url,
-        pr_number=pr_number,
-        branch=branch
-    )
+        job = ReviewJob(
+            repo=repo_url,  # Initially the URL, will be replaced with local path
+            repo_full_name=repo_full_name,
+            pr_number=pr_number,
+            branch=branch,
+            installation_id=installation_id,
+            token_limit=10000  # Default safety limit for GitHub PRs to save credits
+        )
 
-    # Queue the background task to execute the graph
-    background_tasks.add_task(run_agent_workflow, job, payload)
-    
-    return {"status": "queued", "job_id": job.id}
+        background_tasks.add_task(run_agent_workflow, job, payload)
+        return {"status": "queued", "job_id": job.id}
+        
+    return {"status": "ignored", "reason": "Not a pull_request event"}
 
 @app.get("/health")
 async def health_check():
