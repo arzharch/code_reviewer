@@ -176,12 +176,33 @@ def aggregate_and_decide(state: AgentState) -> Dict[str, Any]:
 
     if should_escalate:
         # Post comment on PR with the findings and proposals
-        comment = "## 🤖 Autonomous Code Review Escalation\\n\\nI found issues but the risk of auto-committing is too high. Please review my proposals:\\n\\n"
+        comment_lines = [
+            "## 🤖 Autonomous Code Review Escalation",
+            "",
+            "I found issues but the risk of auto-committing is too high. Please review my proposals:",
+            ""
+        ]
+        
         for idx, p in enumerate(proposals):
-            comment += f"### {p.finding_id}\\n"
-            comment += f"{p.description}\\n\\n"
-            comment += f"```diff\\n{p.diff}\\n```\\n\\n"
+            comment_lines.append(f"### {p.finding_id}")
+            comment_lines.append(f"{p.description}")
+            comment_lines.append("")
             
+            # Format diff nicely, handling potential markdown code blocks from the LLM
+            diff_text = p.diff.strip()
+            if diff_text.startswith("```"):
+                comment_lines.append(diff_text)
+            else:
+                comment_lines.append("```diff")
+                comment_lines.append(diff_text)
+                comment_lines.append("```")
+                
+            comment_lines.append("")
+            comment_lines.append("---")
+            comment_lines.append("")
+            
+        comment = "\n".join(comment_lines)
+        
         if job.pr_number and repo_name_for_api and not str(repo_name_for_api).startswith("C:"):
             GitActionsService.post_pr_comment(repo_name_for_api, job.pr_number, comment, job.installation_id)
         return {"status": "escalated"}
@@ -200,7 +221,7 @@ def aggregate_and_decide(state: AgentState) -> Dict[str, Any]:
                 sandbox.teardown()
             
             # Post success comment
-            comment = "## 🤖 Autonomous Code Review Success\\n\\nI have successfully applied and tested fixes for the discovered issues. The commits have been pushed to your branch."
+            comment = "## 🤖 Autonomous Code Review Success\n\nI have successfully applied and tested fixes for the discovered issues. The commits have been pushed to your branch."
             if job.pr_number and repo_name_for_api and not str(repo_name_for_api).startswith("C:"):
                 GitActionsService.post_pr_comment(repo_name_for_api, job.pr_number, comment, job.installation_id)
                 
