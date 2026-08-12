@@ -6,14 +6,12 @@ RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 # Set working directory
 WORKDIR /app
 
-# Copy the dependency specification
-COPY pyproject.toml .
-
-# Install dependencies
-RUN pip install --no-cache-dir .
-
-# Copy the rest of the application
+# Copy the application (setuptools needs the packages and the README declared
+# in pyproject.toml present at install time)
 COPY . .
+
+# Install the app plus the static-analysis binaries the agent shells out to
+RUN pip install --no-cache-dir ".[analysis]"
 
 # Set python path
 ENV PYTHONPATH=/app
