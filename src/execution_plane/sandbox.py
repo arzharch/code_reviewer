@@ -9,17 +9,56 @@ from src.agent.state import Proposal, TestResult, ProjectProfile
 class SandboxExecutionError(Exception):
     pass
 
+# Environment variables that are safe to expose to untrusted code from a PR.
+# Everything else (API keys, GitHub App private key, DB/Redis DSNs) is stripped.
+_ENV_ALLOWLIST = (
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    # Windows needs these or CreateProcess / socket init fails
+    "SYSTEMROOT",
+    "SystemRoot",
+    "COMSPEC",
+    "ComSpec",
+    "TEMP",
+    "TMP",
+    "PATHEXT",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+)
+
+def build_sandbox_env(home: str) -> dict:
+    """
+    Builds a minimal environment for subprocesses that execute untrusted
+    repository code. The parent process holds OPENAI_API_KEY,
+    GITHUB_PRIVATE_KEY and DB credentials; none of them are inherited.
+    """
+    env = {k: os.environ[k] for k in _ENV_ALLOWLIST if k in os.environ}
+    env["HOME"] = home
+    env["USERPROFILE"] = home
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # Never let git block on a credential/auth prompt inside the sandbox.
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = ""
+    env["GCM_INTERACTIVE"] = "never"
+    return env
+
 class SandboxRuntime:
     """
-    Manages securely executing code, applying patches, and running tests.
-    In a real production environment, this would spin up a gVisor container, 
-    Firecracker microVM, or at minimum a Docker container.
-    For this implementation, we simulate it by copying to a temp directory and running locally.
+    Applies patches and runs a repository's test command off the main tree.
+
+    Isolation level today: a temp-directory copy plus a stripped environment.
+    The test command still runs as a normal child process on the host kernel,
+    with host network access and the host UID. Real isolation (gVisor `runsc`)
+    is Stage 4 and lands behind the same interface; do not treat this class as
+    a security boundary until then.
     """
-    
+
     def __init__(self, original_repo_path: str):
         self.original_repo_path = original_repo_path
         self.sandbox_dir = tempfile.mkdtemp(prefix="agent_sandbox_")
+        self.env = build_sandbox_env(self.sandbox_dir)
 
     def setup(self):
         """Copies the repository to the sandbox directory."""
@@ -64,14 +103,15 @@ class SandboxRuntime:
             # so we use `patch -p1` or initialize a dummy git repo.
             try:
                 # Initialize dummy git to use git apply, as it's more reliable for git diffs
-                subprocess.run(["git", "init"], cwd=self.sandbox_dir, capture_output=True, check=True)
-                subprocess.run(["git", "add", "."], cwd=self.sandbox_dir, capture_output=True)
-                
+                subprocess.run(["git", "init"], cwd=self.sandbox_dir, capture_output=True, check=True, env=self.env)
+                subprocess.run(["git", "add", "."], cwd=self.sandbox_dir, capture_output=True, env=self.env)
+
                 result = subprocess.run(
                     ["git", "apply", patch_path],
                     cwd=self.sandbox_dir,
                     capture_output=True,
-                    text=True
+                    text=True,
+                    env=self.env
                 )
                 if result.returncode != 0:
                     print(f"Failed to apply patch for {proposal.finding_id}: {result.stderr}")
@@ -103,7 +143,8 @@ class SandboxRuntime:
                 shell=False,
                 capture_output=True,
                 text=True,
-                timeout=300 # 5 min timeout
+                timeout=300, # 5 min timeout
+                env=self.env  # untrusted code: no inherited secrets
             )
             
             passed = (result.returncode == 0)
