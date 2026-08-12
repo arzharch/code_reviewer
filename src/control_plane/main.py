@@ -58,6 +58,9 @@ async def run_agent_workflow(job: ReviewJob, payload: dict):
         job.repo = temp_dir
         job.commit_sha = head_sha
         job.raw_diff = diff_content
+        # This workspace is an agent-owned clone with an authenticated remote,
+        # so the agent is allowed to commit and push to the PR branch from it.
+        job.workspace_is_clone = True
         
         async with get_checkpointer() as checkpointer:
             graph = get_compiled_graph(checkpointer=checkpointer)
@@ -68,7 +71,8 @@ async def run_agent_workflow(job: ReviewJob, payload: dict):
                 "findings": [],
                 "proposals": [],
                 "test_results": [],
-                "risk_assessments": []
+                "risk_assessments": [],
+                "unapplied": {}
             }
             
             print(f"Starting agent workflow for job {job.id}")

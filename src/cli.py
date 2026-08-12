@@ -41,7 +41,8 @@ async def run_cli():
                 "findings": [],
                 "proposals": [],
                 "test_results": [],
-                "risk_assessments": []
+                "risk_assessments": [],
+                "unapplied": {}
             }
             
             print("Invoking agent workflow...")

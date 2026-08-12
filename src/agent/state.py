@@ -32,6 +32,7 @@ class Proposal(BaseModel):
     confidence: float
 
 class TestResult(BaseModel):
+    __test__ = False  # not a pytest test class
     proposal_id: Optional[str] = None
     passed: bool
     output: str
@@ -56,6 +57,10 @@ class ReviewJob(BaseModel):
     token_limit: Optional[int] = None
     installation_id: Optional[int] = None
     raw_diff: Optional[str] = None
+    # True once `repo` points at an agent-owned clone with an authenticated
+    # remote. Only then may the agent commit and push. Local CLI runs stay
+    # False so the agent never writes to a developer's checkout.
+    workspace_is_clone: bool = False
 
 class AgentState(TypedDict):
     job: ReviewJob
@@ -66,4 +71,15 @@ class AgentState(TypedDict):
     test_results: List[TestResult]
     risk_assessments: List[RiskAssessment]
     retries_used: Dict[str, int]
-    status: Literal["running", "awaiting_human", "completed", "failed"]
+    # finding_id -> why its patch could not be applied
+    unapplied: Dict[str, str]
+    status: Literal[
+        "running",
+        "awaiting_human",
+        "completed",
+        "failed",
+        "escalated",
+        "auto_committed",
+        "partially_committed",
+        "no_action",
+    ]

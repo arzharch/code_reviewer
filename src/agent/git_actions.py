@@ -112,25 +112,48 @@ class GitActionsService:
         This assumes the patches have already been applied to the working directory.
         """
         try:
+            # Nothing to do if no patch actually changed the tree.
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=repo_path, check=True, capture_output=True, text=True
+            )
+            if not status.stdout.strip():
+                print("commit_and_push: working tree is clean, nothing to commit.")
+                return False
+
             # Stage everything
             subprocess.run(["git", "add", "."], cwd=repo_path, check=True, capture_output=True)
-            
+
             # Formulate commit message
             messages = ["Autonomous Code Review Fixes\n"]
             for p in proposals:
                 messages.append(f"- Fixed {p.finding_id}: {p.description}")
             commit_message = "\n".join(messages)
-            
+
             # Use basic config for commit if missing
             subprocess.run(["git", "config", "user.name", "Autonomous Reviewer"], cwd=repo_path, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.email", "bot@autonomous-reviewer.local"], cwd=repo_path, check=True, capture_output=True)
-            
+
             subprocess.run(["git", "commit", "-m", commit_message], cwd=repo_path, check=True, capture_output=True)
-            
-            # Push (assuming remote is already configured and authenticated via SSH/Token)
-            subprocess.run(["git", "push", "origin", branch_name], cwd=repo_path, check=True, capture_output=True)
-            
+
+            # Workspaces are cloned with --depth 1, and GitHub rejects pushes
+            # from a shallow repository ("shallow update not allowed").
+            is_shallow = subprocess.run(
+                ["git", "rev-parse", "--is-shallow-repository"],
+                cwd=repo_path, capture_output=True, text=True
+            )
+            if is_shallow.stdout.strip() == "true":
+                subprocess.run(["git", "fetch", "--unshallow"], cwd=repo_path, check=True, capture_output=True)
+
+            # The workspace was cloned with an authenticated remote, so origin
+            # is already usable. Push explicitly to the PR head branch.
+            subprocess.run(
+                ["git", "push", "origin", f"HEAD:refs/heads/{branch_name}"],
+                cwd=repo_path, check=True, capture_output=True
+            )
+
             return True
         except subprocess.CalledProcessError as e:
-            print(f"Failed to commit/push: {e.stderr}")
+            stderr = e.stderr.decode() if isinstance(e.stderr, bytes) else e.stderr
+            print(f"Failed to commit/push: {stderr}")
             return False

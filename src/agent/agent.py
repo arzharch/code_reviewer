@@ -1,16 +1,16 @@
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
-from src.agent.state import AgentState, Proposal, TestResult, ProjectProfile
+from src.agent.state import AgentState, Proposal, RiskAssessment, TestResult, ProjectProfile
 from src.agent.risk_engine import RiskEngine
 from src.common.config import settings
 from src.agent.ingestion import IngestionService
 from src.agent.analysis import StaticAnalysisService, LLMAnalysisService
-from src.execution_plane.sandbox import SandboxRuntime
+from src.execution_plane.sandbox import SandboxRuntime, apply_patches
 from src.agent.git_actions import GitActionsService
 
-# --- Stub Tool / Node Functions for Sprint 2 ---
+# --- Graph node functions ---
 
 def ingest_and_detect(state: AgentState) -> Dict[str, Any]:
     """Detects framework and tests commands."""
@@ -87,30 +87,37 @@ def plan_fixes(state: AgentState) -> Dict[str, Any]:
 
     return {"proposals": proposals, "status": "running"}
 
-def apply_in_sandbox_and_test(state: AgentState) -> Dict[str, Any]:
-    """Applies patches and runs tests securely."""
-    repo = state["job"].repo
-    profile = state["profile"]
-    proposals = state.get("proposals", [])
-    
+def verify_proposals(repo: str, profile: ProjectProfile, proposals: List[Proposal]) -> Tuple[TestResult, Dict[str, str]]:
+    """
+    Applies a set of proposals to a throwaway copy of `repo` and runs the
+    project's test suite against the patched tree.
+    Returns the test result plus the proposals that would not apply.
+    """
     sandbox = SandboxRuntime(repo)
     try:
         sandbox.setup()
-        applied = sandbox.apply_proposals(proposals)
-        
-        # If applied successfully, run tests
-        if applied:
-            test_result = sandbox.run_tests(profile)
-        else:
-            test_result = TestResult(
+        apply_result = sandbox.apply_proposals(proposals)
+
+        if not apply_result.applied:
+            return TestResult(
                 passed=False,
                 coverage_percent=0.0,
-                output="Failed to apply one or more patches to the repository."
-            )
-            
-        return {"test_results": [test_result]}
+                output="No proposal produced an applicable patch."
+            ), apply_result.failed
+
+        test_result = sandbox.run_tests(profile)
+        return test_result, apply_result.failed
     finally:
         sandbox.teardown()
+
+def apply_in_sandbox_and_test(state: AgentState) -> Dict[str, Any]:
+    """Applies patches to a disposable tree and runs the project's tests."""
+    repo = state["job"].repo
+    profile = state["profile"]
+    proposals = state.get("proposals", [])
+
+    test_result, unapplied = verify_proposals(repo, profile, proposals)
+    return {"test_results": [test_result], "unapplied": unapplied}
 
 def risk_score(state: AgentState) -> Dict[str, Any]:
     """Evaluates the risk of the proposals based on test results and metrics."""
@@ -125,8 +132,21 @@ def risk_score(state: AgentState) -> Dict[str, Any]:
     
     blast_radius = min(1.0, len(diff_files) / 10.0) if diff_files else 0.1
     
+    unapplied = state.get("unapplied", {}) or {}
+
     assessments = []
     for prop in proposals:
+        # A patch that would not even apply can never be auto-committed.
+        if prop.finding_id in unapplied:
+            assessments.append(RiskAssessment(
+                proposal_id=prop.finding_id,
+                score=1.0,
+                signals={"patch_applied": 0.0},
+                decision="escalate",
+                reasons=[f"Patch could not be applied: {unapplied[prop.finding_id]}"]
+            ))
+            continue
+
         finding = next((f for f in findings if f.id == prop.finding_id), None)
         file_criticality = 0.5
         semantic_risk = 0.0
@@ -162,70 +182,125 @@ def risk_score(state: AgentState) -> Dict[str, Any]:
         
     return {"risk_assessments": assessments}
 
+def _format_proposal_section(proposals: List[Proposal], reasons: Dict[str, List[str]]) -> List[str]:
+    """Renders proposals as markdown for a PR comment."""
+    lines: List[str] = []
+    for p in proposals:
+        lines.append(f"### {p.finding_id}")
+        lines.append(p.description)
+        why = reasons.get(p.finding_id) or []
+        if why:
+            lines.append("")
+            lines.append(f"_Why not auto-committed: {' '.join(why)}_")
+        lines.append("")
+
+        diff_text = p.diff.strip()
+        if diff_text.startswith("```"):
+            lines.append(diff_text)
+        else:
+            lines.append("```diff")
+            lines.append(diff_text)
+            lines.append("```")
+
+        lines.extend(["", "---", ""])
+    return lines
+
 def aggregate_and_decide(state: AgentState) -> Dict[str, Any]:
-    """Decides to auto-commit or escalate based on risk assessments."""
+    """
+    Splits proposals into an auto-commit batch and an escalation batch,
+    re-verifies the auto-commit batch on its own, then pushes it to the PR
+    branch. Anything that fails at any point falls back to escalation.
+    """
     assessments = state.get("risk_assessments", [])
     proposals = state.get("proposals", [])
     job = state["job"]
-    
-    # Check if any assessment requires escalation
-    should_escalate = any(a.decision == "escalate" for a in assessments)
-    
-    # Determine the repo name to use for comments
-    repo_name_for_api = getattr(job, "repo_full_name", None) or job.repo
 
-    if should_escalate:
-        # Post comment on PR with the findings and proposals
-        comment_lines = [
-            "## 🤖 Autonomous Code Review Escalation",
-            "",
-            "I found issues but the risk of auto-committing is too high. Please review my proposals:",
-            ""
-        ]
-        
-        for idx, p in enumerate(proposals):
-            comment_lines.append(f"### {p.finding_id}")
-            comment_lines.append(f"{p.description}")
-            comment_lines.append("")
-            
-            # Format diff nicely, handling potential markdown code blocks from the LLM
-            diff_text = p.diff.strip()
-            if diff_text.startswith("```"):
-                comment_lines.append(diff_text)
+    by_id = {a.proposal_id: a for a in assessments}
+    reasons = {a.proposal_id: a.reasons for a in assessments}
+
+    auto = [p for p in proposals if by_id.get(p.finding_id) and by_id[p.finding_id].decision == "auto_commit"]
+    escalate = [p for p in proposals if p not in auto]
+
+    committed: List[Proposal] = []
+
+    if auto and not (job.workspace_is_clone and job.branch):
+        # No agent-owned clone (local CLI run): suggest only, never write.
+        for p in auto:
+            reasons.setdefault(p.finding_id, []).append("No writable PR workspace; suggesting instead of committing.")
+        escalate.extend(auto)
+        auto = []
+
+    if auto:
+        # The earlier test run covered every proposal at once. The batch we are
+        # about to push is a subset, so verify that exact subset on its own.
+        test_result, unapplied = verify_proposals(job.repo, state["profile"], auto)
+
+        if unapplied:
+            for finding_id, why in unapplied.items():
+                reasons.setdefault(finding_id, []).append(f"Patch failed to apply on re-verification: {why}")
+            escalate.extend([p for p in auto if p.finding_id in unapplied])
+            auto = [p for p in auto if p.finding_id not in unapplied]
+
+        if auto and not test_result.passed:
+            for p in auto:
+                reasons.setdefault(p.finding_id, []).append("Test suite failed when this batch was applied alone.")
+            escalate.extend(auto)
+            auto = []
+
+        if auto:
+            apply_result = apply_patches(job.repo, auto)
+            for finding_id, why in apply_result.failed.items():
+                reasons.setdefault(finding_id, []).append(f"Patch failed to apply to the PR clone: {why}")
+            escalate.extend([p for p in auto if p.finding_id in apply_result.failed])
+            landed = [p for p in auto if p.finding_id in apply_result.applied]
+
+            if landed and GitActionsService.commit_and_push(job.repo, landed, job.branch):
+                committed = landed
             else:
-                comment_lines.append("```diff")
-                comment_lines.append(diff_text)
-                comment_lines.append("```")
-                
-            comment_lines.append("")
-            comment_lines.append("---")
-            comment_lines.append("")
-            
-        comment = "\n".join(comment_lines)
-        
-        if job.pr_number and repo_name_for_api and not str(repo_name_for_api).startswith("C:"):
-            GitActionsService.post_pr_comment(repo_name_for_api, job.pr_number, comment, job.installation_id)
-        return {"status": "escalated"}
+                for p in landed:
+                    reasons.setdefault(p.finding_id, []).append("Commit or push to the PR branch failed.")
+                escalate.extend(landed)
+
+    # --- Report back on the PR -------------------------------------------
+    comment_lines: List[str] = []
+
+    if committed:
+        comment_lines.extend([
+            "## 🤖 Autonomous Code Review — fixes pushed",
+            "",
+            f"I applied {len(committed)} low-risk fix(es), verified them against your test suite, "
+            "and pushed them to this branch.",
+            ""
+        ])
+        for p in committed:
+            comment_lines.append(f"- **{p.finding_id}**: {p.description}")
+        comment_lines.extend(["", "---", ""])
+
+    if escalate:
+        comment_lines.extend([
+            "## 🤖 Autonomous Code Review — needs a human",
+            "",
+            "These changes were too risky for me to commit. Proposals below:",
+            ""
+        ])
+        comment_lines.extend(_format_proposal_section(escalate, reasons))
+
+    repo_name_for_api = job.repo_full_name
+    if comment_lines and job.pr_number and repo_name_for_api:
+        GitActionsService.post_pr_comment(
+            repo_name_for_api, job.pr_number, "\n".join(comment_lines), job.installation_id
+        )
+
+    if committed and escalate:
+        status = "partially_committed"
+    elif committed:
+        status = "auto_committed"
+    elif escalate:
+        status = "escalated"
     else:
-        # All safe to auto-commit
-        if job.branch:
-            # We assume the sandbox has successfully verified, but we need to commit
-            # directly to the local clone, since sandbox is ephemeral.
-            # In production, we'd apply the patches to the repo local clone, then push.
-            sandbox = SandboxRuntime(job.repo)
-            sandbox.setup()
-            try:
-                sandbox.apply_proposals(proposals)
-                GitActionsService.commit_and_push(sandbox.sandbox_dir, proposals, job.branch)
-            finally:
-                sandbox.teardown()
-            
-            # Post success comment
-            comment = "## 🤖 Autonomous Code Review Success\n\nI have successfully applied and tested fixes for the discovered issues. The commits have been pushed to your branch."
-            if job.pr_number and repo_name_for_api and not str(repo_name_for_api).startswith("C:"):
-                GitActionsService.post_pr_comment(repo_name_for_api, job.pr_number, comment, job.installation_id)
-                
-        return {"status": "auto_committed"}
+        status = "no_action"
+
+    return {"status": status}
 
 # --- Graph Construction ---
 
