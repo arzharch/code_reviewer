@@ -3,6 +3,8 @@ import requests
 import tempfile
 import os
 from typing import List, Optional, Tuple
+from tenacity import retry, stop_after_attempt, wait_exponential
+
 from src.agent.state import Proposal
 from src.common.config import settings
 
@@ -12,6 +14,7 @@ class GitActionsService:
     """
 
     @staticmethod
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def get_token_string(installation_id: Optional[int] = None) -> str:
         """Helper to get the raw token string for git clone / requests."""
         if installation_id and settings.github_app_id and settings.github_private_key:
@@ -43,6 +46,7 @@ class GitActionsService:
         return settings.github_token.get_secret_value() if settings.github_token else ""
 
     @staticmethod
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def clone_and_prep_pr(repo_full_name: str, pr_number: int, clone_url: str, installation_id: Optional[int] = None) -> Tuple[str, str, str, str]:
         """
         Clones the PR head branch into a temporary directory and fetches the PR diff.
@@ -88,6 +92,7 @@ class GitActionsService:
         return bool(repo_path) and os.path.isdir(repo_path)
 
     @staticmethod
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def post_pr_comment(repo_full_name: str, pr_number: int, comment: str, installation_id: Optional[int] = None) -> bool:
         """
         Posts a comment to a GitHub PR via the raw GitHub API.
@@ -111,6 +116,7 @@ class GitActionsService:
             return False
 
     @staticmethod
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def commit_and_push(repo_path: str, proposals: List[Proposal], branch_name: str) -> bool:
         """
         Commits applied patches directly to the repo and pushes to remote.

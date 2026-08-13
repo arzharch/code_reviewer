@@ -1,0 +1,33 @@
+FROM python:3.11-slim
+
+# Install basic dependencies and alternate language runtimes
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    git \
+    nodejs \
+    npm \
+    make \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pre-install some common Python linters/test-runners for speed
+RUN pip install --no-cache-dir \
+    pytest \
+    pytest-cov \
+    pytest-asyncio \
+    coverage \
+    ruff \
+    bandit \
+    mypy
+
+# Pre-install global Node packages
+RUN npm install -g jest vitest typescript
+
+# Set a non-root user for security (though gVisor also restricts the container)
+RUN useradd -m -s /bin/bash sandbox_user
+USER sandbox_user
+ENV HOME=/home/sandbox_user
+WORKDIR $HOME/workspace
+
+# Keep container alive if run without args, though it's typically run with a command
+CMD ["sleep", "infinity"]

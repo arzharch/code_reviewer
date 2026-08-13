@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: control-plane-svc
+  namespace: code-reviewer
+spec:
+  selector:
+    app: control-plane
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
+  type: ClusterIP

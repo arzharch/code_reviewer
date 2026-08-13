@@ -35,82 +35,21 @@ else:
                    extra={"reason": "GITHUB_WEBHOOK_SECRET is not set"})
 
 
-def _initial_state(job: ReviewJob) -> dict:
-    return {
-        "job": job,
-        "findings": [],
-        "plan": [],
-        "pending_finding_ids": [],
-        "proposals": [],
-        "test_results": [],
-        "risk_assessments": [],
-        "unapplied": {},
-        "retries_used": {},
-        "replan_rounds": 0,
-        "tokens_used": 0,
-        "status": "running",
-    }
+from arq import create_pool
+from arq.connections import RedisSettings
 
+# Global ARQ Redis pool
+redis_pool = None
 
-async def run_agent_workflow(job: ReviewJob, payload: dict):
-    """
-    Background task that executes the LangGraph agent workflow for the incoming PR.
-    """
-    temp_dir = None
-    with job_context(job.id):
-        try:
-            repo_full_name = job.repo_full_name
-            if not repo_full_name or not job.pr_number:
-                logger.error("workflow.missing_pr_context")
-                return
+@app.on_event("startup")
+async def startup_event():
+    global redis_pool
+    redis_pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
 
-            logger.info("workflow.start", extra={"repo": repo_full_name, "pr": job.pr_number})
-
-            GitActionsService.post_pr_comment(
-                repo_full_name=repo_full_name,
-                pr_number=job.pr_number,
-                comment=(
-                    "🤖 **Autonomous Code Reviewer**: I've received your pull request and am "
-                    f"analyzing it now. Job `{job.id}`."
-                ),
-                installation_id=job.installation_id
-            )
-
-            temp_dir, diff_content, head_sha, base_sha = GitActionsService.clone_and_prep_pr(
-                repo_full_name=repo_full_name,
-                pr_number=job.pr_number,
-                clone_url=job.repo,
-                installation_id=job.installation_id
-            )
-
-            job.repo = temp_dir
-            job.commit_sha = head_sha
-            job.raw_diff = diff_content
-            # This workspace is an agent-owned clone with an authenticated remote,
-            # so the agent is allowed to commit and push to the PR branch from it.
-            job.workspace_is_clone = True
-
-            async with get_checkpointer() as checkpointer:
-                graph = get_compiled_graph(checkpointer=checkpointer)
-                config = {"configurable": {"thread_id": job.id}}
-
-                final_state = await graph.ainvoke(_initial_state(job), config=config)
-                logger.info("workflow.done", extra={"final_status": final_state.get("status")})
-        except Exception:
-            logger.exception("workflow.failed")
-            if job.repo_full_name and job.pr_number:
-                GitActionsService.post_pr_comment(
-                    repo_full_name=job.repo_full_name,
-                    pr_number=job.pr_number,
-                    comment=(
-                        "🤖 **Autonomous Code Reviewer**: this review failed partway through. "
-                        f"Job `{job.id}` can be resumed once the cause is fixed."
-                    ),
-                    installation_id=job.installation_id
-                )
-        finally:
-            if temp_dir:
-                shutil.rmtree(temp_dir, ignore_errors=True)
+@app.on_event("shutdown")
+async def shutdown_event():
+    if redis_pool:
+        await redis_pool.close()
 
 
 @app.post("/webhook")
@@ -142,7 +81,11 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
 
         logger.info("webhook.accepted", extra={"job_id": job.id, "repo": repo_full_name,
                                                "pr": pr_number, "action": action})
-        background_tasks.add_task(run_agent_workflow, job, payload)
+        
+        # Enqueue to ARQ instead of FastAPI BackgroundTasks
+        if redis_pool:
+            await redis_pool.enqueue_job("run_agent_workflow", job.model_dump(), payload, _job_id=job.id)
+            
         return {"status": "accepted", "job_id": job.id}
 
     return {"status": "ignored", "reason": "Not a pull_request event"}

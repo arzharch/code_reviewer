@@ -143,11 +143,11 @@ class SandboxRuntime:
     """
     Applies patches and runs a repository's test command off the main tree.
 
-    Isolation level today: a temp-directory copy plus a stripped environment.
-    The test command still runs as a normal child process on the host kernel,
-    with host network access and the host UID. Real isolation (gVisor `runsc`)
-    is Stage 4 and lands behind the same interface; do not treat this class as
-    a security boundary until then.
+    Applies patches locally, then runs a repository's test command securely 
+    inside a gVisor Docker container (`--runtime=runsc`).
+
+    Real isolation (gVisor `runsc`) prevents untrusted test suites from breaking
+    out to the host network or executing kernel exploits.
     """
 
     def __init__(self, original_repo_path: str):
@@ -199,16 +199,27 @@ class SandboxRuntime:
             )
 
         try:
-            # Safely split command instead of using shell=True
-            args = shlex.split(cmd)
+            # We map the sandbox_dir into the container at /workspace
+            # and run the test_command safely inside.
+            # Using --network=none to prevent untrusted code from making outbound calls.
+            # Using --runtime=runsc for gVisor isolation (if available on the host).
+            # If runsc isn't installed locally, you can remove --runtime=runsc for local dev.
+            
+            docker_cmd = [
+                "docker", "run", "--rm",
+                "--network=none",
+                "--runtime=runsc",
+                "-v", f"{self.sandbox_dir}:/workspace",
+                "-w", "/workspace",
+                "autonomous-sandbox:latest",
+                "bash", "-c", cmd
+            ]
+            
             result = subprocess.run(
-                args,
-                cwd=self.sandbox_dir,
-                shell=False,
+                docker_cmd,
                 capture_output=True,
                 text=True,
-                timeout=settings.test_timeout_seconds,
-                env=self.env  # untrusted code: no inherited secrets
+                timeout=settings.test_timeout_seconds
             )
             
             passed = (result.returncode == 0)

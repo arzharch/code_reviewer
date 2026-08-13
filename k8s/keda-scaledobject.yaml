@@ -1,0 +1,16 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-scaler
+  namespace: code-reviewer
+spec:
+  scaleTargetRef:
+    name: worker
+  minReplicaCount: 0  # Scale down to zero when queue is empty!
+  maxReplicaCount: 10
+  triggers:
+    - type: redis
+      metadata:
+        address: redis-svc.code-reviewer.svc.cluster.local:6379
+        listName: arq:queue  # ARQ's default queue key in Redis
+        listLength: "1"      # 1 job per pod

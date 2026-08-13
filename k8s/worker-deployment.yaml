@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: code-reviewer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      containers:
+        - name: arq-worker
+          image: autonomous-reviewer-api:latest
+          imagePullPolicy: IfNotPresent
+          command: ["arq", "src.control_plane.worker.WorkerSettings"]
+          envFrom:
+            - secretRef:
+                name: code-reviewer-secrets
+          securityContext:
+            privileged: true  # Needed if running Docker-in-Docker or mounting docker.sock
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock
