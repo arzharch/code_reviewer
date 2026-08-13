@@ -7,6 +7,11 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from src.agent.state import Finding
 from src.common.config import settings
+from src.common.logging import get_logger
+
+logger = get_logger("agent.analysis")
+
+PYTHON_SUFFIXES = (".py", ".pyi")
 
 class StaticAnalysisService:
     """
@@ -16,6 +21,15 @@ class StaticAnalysisService:
     def __init__(self, repo_path: str, diff_files: Optional[List[str]] = None):
         self.repo_path = repo_path
         self.diff_files = diff_files or []
+
+    def _python_targets(self, files: Optional[List[str]]) -> List[str]:
+        """Existing Python files from the changed-file list, if any."""
+        if not files:
+            return []
+        return [
+            f for f in files
+            if f.endswith(PYTHON_SUFFIXES) and (Path(self.repo_path) / f).is_file()
+        ]
 
     def run_ruff(self, diff_files: Optional[List[str]] = None) -> List[Finding]:
         """
@@ -31,7 +45,7 @@ class StaticAnalysisService:
         try:
             result = subprocess.run(cmd, cwd=self.repo_path, capture_output=True, text=True)
         except FileNotFoundError:
-            print("Ruff not found. Skipping static analysis with ruff.")
+            logger.warning("tool.missing", extra={"tool": "ruff"})
             return []
         
         findings = []
@@ -65,13 +79,15 @@ class StaticAnalysisService:
         """
         Runs Bandit (security scanner) and parses output.
         """
-        cmd = ["bandit", "-f", "json", "-r", "."]
-        # In a real setup, we would filter to diff_files if provided
-        
+        targets = self._python_targets(diff_files or self.diff_files)
+        # Scan only the changed files when we know them; a whole-repo scan
+        # reports issues the PR did not introduce.
+        cmd = ["bandit", "-f", "json"] + (targets if targets else ["-r", "."])
+
         try:
             result = subprocess.run(cmd, cwd=self.repo_path, capture_output=True, text=True)
         except FileNotFoundError:
-            print("Bandit not found. Skipping security scan.")
+            logger.warning("tool.missing", extra={"tool": "bandit"})
             return []
             
         findings = []
@@ -98,12 +114,12 @@ class StaticAnalysisService:
         """
         Runs MyPy (type checker) and parses output.
         """
-        # A simple non-json output parsing for mypy
-        cmd = ["mypy", ".", "--show-error-codes"]
+        targets = self._python_targets(diff_files or self.diff_files)
+        cmd = ["mypy", "--show-error-codes", "--no-error-summary"] + (targets if targets else ["."])
         try:
             result = subprocess.run(cmd, cwd=self.repo_path, capture_output=True, text=True)
         except FileNotFoundError:
-            print("MyPy not found. Skipping type check.")
+            logger.warning("tool.missing", extra={"tool": "mypy"})
             return []
             
         findings = []
@@ -148,16 +164,30 @@ class LLMAnalysisService:
     def __init__(self, repo_path: str, diff_files: Optional[List[str]] = None, token_limit: Optional[int] = None):
         self.repo_path = repo_path
         self.diff_files = diff_files or []
-        self.token_limit = token_limit
-        self.original_token_limit = token_limit
-        self.llm = ChatOpenAI(
-            model="gpt-4o-mini",
-            api_key=settings.openai_api_key.get_secret_value() if settings.openai_api_key else None, # type: ignore
-            temperature=0
-        )
+        # A review runs unattended, so the budget is a hard ceiling: when it is
+        # spent the scan stops and reports what it has.
+        self.token_limit = token_limit or settings.token_budget
+        self.tokens_used = 0
+        # Built lazily: constructing ChatOpenAI without credentials raises, and
+        # a missing key must degrade to "no semantic findings", not kill the run.
+        self._llm = None
+
+    @property
+    def llm(self):
+        if self._llm is None:
+            self._llm = ChatOpenAI(
+                model=settings.openai_analysis_model,
+                api_key=settings.openai_api_key.get_secret_value(),  # type: ignore
+                temperature=0
+            )
+        return self._llm
 
     def run_semantic_analysis(self) -> List[Finding]:
         if not self.diff_files:
+            return []
+
+        if not settings.openai_api_key:
+            logger.warning("semantic_analysis.skipped", extra={"reason": "no OPENAI_API_KEY configured"})
             return []
 
         prompt = ChatPromptTemplate.from_messages([
@@ -166,7 +196,6 @@ class LLMAnalysisService:
         ])
 
         findings = []
-        total_tokens_used = 0
 
         for file_path in self.diff_files:
             full_path = Path(self.repo_path) / file_path
@@ -178,18 +207,19 @@ class LLMAnalysisService:
                         code_content = code_content[:10000]
                         
                     estimated_tokens = len(code_content) // 4
-                    if self.token_limit and self.original_token_limit and (total_tokens_used + estimated_tokens) > self.token_limit:
-                        ans = input(f"\n[LLM Limit] Token limit of {self.token_limit} reached (used ~{total_tokens_used}). Continue scanning for another {self.original_token_limit} tokens? (y/n): ")
-                        if ans.strip().lower() != 'y':
-                            print(f"Stopping LLM analysis. Returning {len(findings)} findings gathered so far.")
-                            break
-                        else:
-                            # Bump limit by the original amount
-                            self.token_limit += self.original_token_limit
-                        
+                    if (self.tokens_used + estimated_tokens) > self.token_limit:
+                        logger.warning(
+                            "semantic_analysis.budget_exhausted",
+                            extra={"token_limit": self.token_limit,
+                                   "tokens_used": self.tokens_used,
+                                   "findings_so_far": len(findings),
+                                   "stopped_at": file_path},
+                        )
+                        break
+
                     chain = prompt | self.llm
                     response = chain.invoke({"file_path": file_path, "code": code_content})
-                    total_tokens_used += estimated_tokens
+                    self.tokens_used += estimated_tokens
                     
                     try:
                         # Very naive parse of the LLM response
@@ -212,7 +242,9 @@ class LLMAnalysisService:
                             ))
                     except json.JSONDecodeError:
                         pass
-                except Exception as e:
-                    print(f"Failed semantic analysis for {file_path}: {e}")
-                    
+                except Exception:
+                    logger.exception("semantic_analysis.file_failed", extra={"file": file_path})
+
+        logger.info("semantic_analysis.done",
+                    extra={"findings": len(findings), "tokens_used": self.tokens_used})
         return findings

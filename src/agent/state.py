@@ -1,7 +1,10 @@
-from typing import List, Dict, Literal, Tuple, Optional
+import operator
+import uuid
+from typing import Annotated, Dict, List, Literal, Optional, Tuple
+
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
-import uuid
+
 
 class ProjectProfile(BaseModel):
     primary_language: str
@@ -24,6 +27,14 @@ class Finding(BaseModel):
     category: str
     description: str
 
+class PlanItem(BaseModel):
+    """One unit of work chosen by the planner before any diff is drafted."""
+    finding_id: str
+    approach: str
+    priority: int = 5
+    skip: bool = False
+    skip_reason: Optional[str] = None
+
 class Proposal(BaseModel):
     finding_id: str
     diff: str
@@ -38,6 +49,7 @@ class TestResult(BaseModel):
     output: str
     duration_s: float = 0.0
     coverage_percent: float = 0.0
+    attempt: int = 0
 
 class RiskAssessment(BaseModel):
     proposal_id: str
@@ -62,17 +74,79 @@ class ReviewJob(BaseModel):
     # False so the agent never writes to a developer's checkout.
     workspace_is_clone: bool = False
 
-class AgentState(TypedDict):
+
+# --- Reducers ---------------------------------------------------------------
+# Proposals are verified in parallel, one branch per proposal, so every channel
+# those branches write to needs an explicit merge strategy.
+
+def upsert_proposals(left: Optional[List[Proposal]], right: Optional[List[Proposal]]) -> List[Proposal]:
+    """Last write per finding_id wins, so a repaired diff replaces its original."""
+    merged: Dict[str, Proposal] = {p.finding_id: p for p in (left or [])}
+    for proposal in right or []:
+        merged[proposal.finding_id] = proposal
+    return list(merged.values())
+
+
+def merge_counters(left: Optional[Dict[str, int]], right: Optional[Dict[str, int]]) -> Dict[str, int]:
+    return {**(left or {}), **(right or {})}
+
+
+def merge_failures(left: Optional[Dict[str, str]], right: Optional[Dict[str, str]]) -> Dict[str, str]:
+    """
+    Merges patch-failure reasons. An empty reason clears the entry, which is how
+    a successful repair retracts an earlier failure.
+    """
+    merged = {**(left or {})}
+    for finding_id, reason in (right or {}).items():
+        if reason:
+            merged[finding_id] = reason
+        else:
+            merged.pop(finding_id, None)
+    return merged
+
+
+def replace(left, right):
+    """Plain last-write-wins for channels written by a single branch."""
+    return right if right is not None else left
+
+
+class ProposalOutput(TypedDict, total=False):
+    """The only channels the per-proposal subgraph writes back to the parent."""
+    proposals: Annotated[List[Proposal], upsert_proposals]
+    test_results: Annotated[List[TestResult], operator.add]
+    unapplied: Annotated[Dict[str, str], merge_failures]
+    retries_used: Annotated[Dict[str, int], merge_counters]
+
+
+class ProposalState(TypedDict, total=False):
+    """State of one proposal being applied, tested and repaired in isolation."""
+    job: ReviewJob
+    profile: ProjectProfile
+    proposal: Proposal
+    finding: Optional[Finding]
+    attempt: int
+    last_error: str
+    proposals: Annotated[List[Proposal], upsert_proposals]
+    test_results: Annotated[List[TestResult], operator.add]
+    unapplied: Annotated[Dict[str, str], merge_failures]
+    retries_used: Annotated[Dict[str, int], merge_counters]
+
+
+class AgentState(TypedDict, total=False):
     job: ReviewJob
     profile: ProjectProfile
     diff_files: List[str]
     findings: List[Finding]
-    proposals: List[Proposal]
-    test_results: List[TestResult]
+    plan: List[PlanItem]
+    # finding_ids drafted and verified in the current round
+    pending_finding_ids: Annotated[List[str], replace]
+    proposals: Annotated[List[Proposal], upsert_proposals]
+    test_results: Annotated[List[TestResult], operator.add]
+    unapplied: Annotated[Dict[str, str], merge_failures]
+    retries_used: Annotated[Dict[str, int], merge_counters]
     risk_assessments: List[RiskAssessment]
-    retries_used: Dict[str, int]
-    # finding_id -> why its patch could not be applied
-    unapplied: Dict[str, str]
+    replan_rounds: int
+    tokens_used: int
     status: Literal[
         "running",
         "awaiting_human",

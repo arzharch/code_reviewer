@@ -56,3 +56,5 @@ addopts = "-q"
 [tool.ruff]
 line-length = 88
 target-version = "py311"
+# Deliberately vulnerable sample files used to exercise the reviewer.
+exclude = ["tests/fixtures"]

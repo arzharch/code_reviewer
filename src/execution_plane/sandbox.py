@@ -6,6 +6,7 @@ import shutil
 from typing import Dict, List, Optional
 from pydantic import BaseModel
 from src.agent.state import Proposal, TestResult, ProjectProfile
+from src.common.config import settings
 
 class SandboxExecutionError(Exception):
     pass
@@ -206,7 +207,7 @@ class SandboxRuntime:
                 shell=False,
                 capture_output=True,
                 text=True,
-                timeout=300, # 5 min timeout
+                timeout=settings.test_timeout_seconds,
                 env=self.env  # untrusted code: no inherited secrets
             )
             

@@ -83,6 +83,11 @@ class GitActionsService:
         return temp_dir, diff_content, head_sha, base_sha
 
     @staticmethod
+    def workspace_exists(repo_path: str) -> bool:
+        """True if a job's cloned workspace is still on disk."""
+        return bool(repo_path) and os.path.isdir(repo_path)
+
+    @staticmethod
     def post_pr_comment(repo_full_name: str, pr_number: int, comment: str, installation_id: Optional[int] = None) -> bool:
         """
         Posts a comment to a GitHub PR via the raw GitHub API.

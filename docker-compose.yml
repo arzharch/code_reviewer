@@ -45,6 +45,14 @@ services:
       # Override the local DB/Redis URLs to point to Docker containers
       - REDIS_URL=redis://redis:6379/0
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/agent_db
+    # Migrations are part of startup so a fresh clone boots with a usable schema.
+    command: sh -c "alembic upgrade head && python -m src.control_plane.server"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     depends_on:
       postgres:
         condition: service_healthy
