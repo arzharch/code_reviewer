@@ -43,3 +43,7 @@ MANIFEST
 
 # LangGraph
 .langchain.db
+
+# Personal Docs
+docs/INTERVIEW_QA.md
+docs/KUBERNETES_GUIDE.md
