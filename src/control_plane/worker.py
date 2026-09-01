@@ -1,7 +1,5 @@
 import shutil
-from arq import Worker
 from arq.connections import RedisSettings
-import json
 
 from src.agent.agent import get_compiled_graph
 from src.agent.checkpointer import get_checkpointer

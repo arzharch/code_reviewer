@@ -1,6 +1,7 @@
-import shutil
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from arq import create_pool
+from arq.connections import RedisSettings
 
 from src.agent.agent import get_compiled_graph
 from src.agent.checkpointer import get_checkpointer
@@ -35,8 +36,7 @@ else:
                    extra={"reason": "GITHUB_WEBHOOK_SECRET is not set"})
 
 
-from arq import create_pool
-from arq.connections import RedisSettings
+
 
 # Global ARQ Redis pool
 redis_pool = None

@@ -1,11 +1,13 @@
 # Autonomous Code Review Agent
 
-**A LangGraph agent that reviews pull requests, drafts patches, runs the project's own test suite against them, and commits the low-risk ones to the PR branch — escalating everything else to a human.**
+**LangGraph, Agentic AI, Kubernetes, FastAPI, gVisor, LLMs**
 
-It is not a commenting bot. Every proposal is applied to a disposable copy of the
-repository and verified by running the project's real test command. A
-deterministic risk engine, not the model, decides whether a verified fix is
-committed automatically or handed to a reviewer.
+An AI-powered, fully autonomous code reviewer that understands your framework, runs your tests, and writes safe fixes. Using a deterministic risk model, it autonomously commits low-risk fixes directly to the PR branch and escalates high-risk changes to human developers.
+
+## Highlights
+- **System Design:** Control Plane for serverless GitHub webhook intake and Execution Plane pulling jobs into ephemeral Kubernetes microVMs (gVisor/Firecracker).
+- **Agentic Architecture:** Moved beyond a single-trajectory ReAct loop to a resilient, resumable plan-and-execute LangGraph topology with a per-proposal sandbox subgraph.
+- **Process Flow:** The agent applies patches and runs the project's actual test suite; it receives a bounded retry budget for self-correction before routing through a hard-gate risk engine.
 
 ---
 
@@ -150,4 +152,4 @@ routing, risk scoring, and every branch of the auto-commit vs escalate decision.
 | 3 | Redis Streams queue + separate worker, retries, run/audit persistence, autonomy modes | Done |
 | 4 | Real sandbox isolation via gVisor (`runsc`), no host network, resource caps | Done |
 | 5 | Kubernetes deployment, KEDA scaling on queue depth, `RuntimeClass: gvisor` | Done |
-| 6 | CI, dogfooding the agent on this repository | Next |
+| 6 | CI, dogfooding the agent on this repository | Done |

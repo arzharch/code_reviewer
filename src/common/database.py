@@ -1,8 +1,12 @@
+import uuid
+from typing import Dict, Any, Optional
+
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import declarative_base
 from contextlib import asynccontextmanager
 
 from .config import settings
+from .models import Run, AuditLog
 
 # Base class for SQLAlchemy models
 Base = declarative_base()
@@ -45,9 +49,7 @@ async def get_db_session():
         finally:
             await session.close()
 
-from .models import Run, Finding, AuditLog
-import uuid
-from typing import Dict, Any, Optional
+
 
 async def log_run(run_id: str, repo: str, status: str, surface: str = "github_app", pr_number: Optional[int] = None, profile: Optional[Dict[str, Any]] = None):
     async with get_db_session() as session:
