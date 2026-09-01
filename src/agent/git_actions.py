@@ -3,7 +3,8 @@ import requests
 import tempfile
 import os
 from typing import List, Optional, Tuple
-from github import Github, Auth
+from tenacity import retry, stop_after_attempt, wait_exponential
+
 from src.agent.state import Proposal
 from src.common.config import settings
 
@@ -13,113 +14,157 @@ class GitActionsService:
     """
 
     @staticmethod
-    def get_github_client(installation_id: Optional[int] = None) -> Github:
-        """
-        Returns an authenticated PyGithub client.
-        Uses App Auth if configured, otherwise falls back to PAT.
-        """
-        if installation_id and settings.github_app_id and settings.github_private_key:
-            from github import GithubIntegration
-            auth = Auth.AppAuth(
-                int(settings.github_app_id),
-                settings.github_private_key.get_secret_value()
-            )
-            gi = GithubIntegration(auth=auth)
-            return gi.get_github_for_installation(installation_id)
-        
-        token = settings.github_token.get_secret_value() if settings.github_token else None
-        if token:
-            auth = Auth.Token(token)
-            return Github(auth=auth)
-            
-        raise ValueError("No GitHub credentials configured")
-
-    @staticmethod
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def get_token_string(installation_id: Optional[int] = None) -> str:
         """Helper to get the raw token string for git clone / requests."""
         if installation_id and settings.github_app_id and settings.github_private_key:
-            from github import GithubIntegration
-            auth = Auth.AppAuth(
-                int(settings.github_app_id),
-                settings.github_private_key.get_secret_value()
+            import jwt
+            import time
+            
+            payload = {
+                "iat": int(time.time()) - 60,
+                "exp": int(time.time()) + (10 * 60),
+                "iss": str(settings.github_app_id)
+            }
+            
+            encoded_jwt = jwt.encode(
+                payload, 
+                settings.github_private_key.get_secret_value(), 
+                algorithm="RS256"
             )
-            gi = GithubIntegration(auth=auth)
-            return gi.get_access_token(installation_id).token
+            
+            url = f"https://api.github.com/app/installations/{installation_id}/access_tokens"
+            headers = {
+                "Authorization": f"Bearer {encoded_jwt}",
+                "Accept": "application/vnd.github.v3+json"
+            }
+            
+            resp = requests.post(url, headers=headers)
+            resp.raise_for_status()
+            return resp.json()["token"]
             
         return settings.github_token.get_secret_value() if settings.github_token else ""
 
     @staticmethod
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def clone_and_prep_pr(repo_full_name: str, pr_number: int, clone_url: str, installation_id: Optional[int] = None) -> Tuple[str, str, str, str]:
         """
         Clones the PR head branch into a temporary directory and fetches the PR diff.
         Returns: (temp_dir_path, diff_content, head_sha, base_sha)
         """
-        gh = GitActionsService.get_github_client(installation_id)
-        repo = gh.get_repo(repo_full_name)
-        pr = repo.get_pull(pr_number)
-        
         token = GitActionsService.get_token_string(installation_id)
         
-        # 1. Fetch Diff via GitHub API
-        headers = {"Authorization": f"Bearer {token}"} if token else {}
-        diff_resp = requests.get(pr.diff_url, headers=headers)
+        # 1. Fetch Diff via GitHub API manually to avoid PyGithub lazy loading bugs
+        api_url = f"https://api.github.com/repos/{repo_full_name}/pulls/{pr_number}"
+        
+        # Get the unified diff
+        diff_headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github.v3.diff"} if token else {"Accept": "application/vnd.github.v3.diff"}
+        diff_resp = requests.get(api_url, headers=diff_headers)
         diff_resp.raise_for_status()
         diff_content = diff_resp.text
+        
+        # Get the PR JSON to extract shas
+        json_headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github.v3+json"} if token else {"Accept": "application/vnd.github.v3+json"}
+        pr_resp = requests.get(api_url, headers=json_headers)
+        pr_resp.raise_for_status()
+        pr_data = pr_resp.json()
+        
+        head_sha = pr_data["head"]["sha"]
+        head_ref = pr_data["head"]["ref"]
+        base_sha = pr_data["base"]["sha"]
         
         # 2. Clone Repository securely
         auth_clone_url = clone_url.replace("https://", f"https://x-access-token:{token}@") if token else clone_url
         
         temp_dir = tempfile.mkdtemp(prefix="agent_workspace_")
         
-        print(f"Cloning {repo_full_name} branch {pr.head.ref} into {temp_dir}...")
+        print(f"Cloning {repo_full_name} branch {head_ref} into {temp_dir}...")
         subprocess.run(
-            ["git", "clone", "--depth", "1", "--branch", pr.head.ref, auth_clone_url, temp_dir],
+            ["git", "clone", "--depth", "1", "--branch", head_ref, auth_clone_url, temp_dir],
             check=True, capture_output=True
         )
         
-        return temp_dir, diff_content, pr.head.sha, pr.base.sha
+        return temp_dir, diff_content, head_sha, base_sha
 
     @staticmethod
+    def workspace_exists(repo_path: str) -> bool:
+        """True if a job's cloned workspace is still on disk."""
+        return bool(repo_path) and os.path.isdir(repo_path)
+
+    @staticmethod
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def post_pr_comment(repo_full_name: str, pr_number: int, comment: str, installation_id: Optional[int] = None) -> bool:
         """
-        Posts a comment to a GitHub PR via the PyGithub API.
+        Posts a comment to a GitHub PR via the raw GitHub API.
         """
         try:
-            gh = GitActionsService.get_github_client(installation_id)
-            repo = gh.get_repo(repo_full_name)
-            pr = repo.get_pull(pr_number)
-            pr.create_issue_comment(comment)
+            token = GitActionsService.get_token_string(installation_id)
+            if not token:
+                print("No token available to post comment.")
+                return False
+                
+            url = f"https://api.github.com/repos/{repo_full_name}/issues/{pr_number}/comments"
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github.v3+json"
+            }
+            resp = requests.post(url, headers=headers, json={"body": comment})
+            resp.raise_for_status()
             return True
         except Exception as e:
             print(f"Failed to post comment: {e}")
             return False
 
     @staticmethod
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def commit_and_push(repo_path: str, proposals: List[Proposal], branch_name: str) -> bool:
         """
         Commits applied patches directly to the repo and pushes to remote.
         This assumes the patches have already been applied to the working directory.
         """
         try:
+            # Nothing to do if no patch actually changed the tree.
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=repo_path, check=True, capture_output=True, text=True
+            )
+            if not status.stdout.strip():
+                print("commit_and_push: working tree is clean, nothing to commit.")
+                return False
+
             # Stage everything
             subprocess.run(["git", "add", "."], cwd=repo_path, check=True, capture_output=True)
-            
+
             # Formulate commit message
             messages = ["Autonomous Code Review Fixes\n"]
             for p in proposals:
                 messages.append(f"- Fixed {p.finding_id}: {p.description}")
             commit_message = "\n".join(messages)
-            
+
             # Use basic config for commit if missing
             subprocess.run(["git", "config", "user.name", "Autonomous Reviewer"], cwd=repo_path, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.email", "bot@autonomous-reviewer.local"], cwd=repo_path, check=True, capture_output=True)
-            
+
             subprocess.run(["git", "commit", "-m", commit_message], cwd=repo_path, check=True, capture_output=True)
-            
-            # Push (assuming remote is already configured and authenticated via SSH/Token)
-            subprocess.run(["git", "push", "origin", branch_name], cwd=repo_path, check=True, capture_output=True)
-            
+
+            # Workspaces are cloned with --depth 1, and GitHub rejects pushes
+            # from a shallow repository ("shallow update not allowed").
+            is_shallow = subprocess.run(
+                ["git", "rev-parse", "--is-shallow-repository"],
+                cwd=repo_path, capture_output=True, text=True
+            )
+            if is_shallow.stdout.strip() == "true":
+                subprocess.run(["git", "fetch", "--unshallow"], cwd=repo_path, check=True, capture_output=True)
+
+            # The workspace was cloned with an authenticated remote, so origin
+            # is already usable. Push explicitly to the PR head branch.
+            subprocess.run(
+                ["git", "push", "origin", f"HEAD:refs/heads/{branch_name}"],
+                cwd=repo_path, check=True, capture_output=True
+            )
+
             return True
         except subprocess.CalledProcessError as e:
-            print(f"Failed to commit/push: {e.stderr}")
+            stderr = e.stderr.decode() if isinstance(e.stderr, bytes) else e.stderr
+            print(f"Failed to commit/push: {stderr}")
             return False

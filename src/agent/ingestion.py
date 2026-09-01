@@ -34,6 +34,25 @@ class IngestionService:
         return result.stdout
 
     @staticmethod
+    def read_file(repo_path: str, relative_path: str, max_chars: int = 12000) -> str:
+        """
+        Reads a repository file for prompt context. Missing or binary files come
+        back as a marker rather than raising, so one unreadable path cannot kill
+        a whole drafting round.
+        """
+        target = Path(repo_path) / relative_path
+        try:
+            if not target.is_file():
+                return "<file not found in workspace>"
+            content = target.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            return f"<could not read file: {e}>"
+
+        if len(content) > max_chars:
+            return content[:max_chars] + "\n<file truncated>"
+        return content
+
+    @staticmethod
     def detect_project_profile(repo_path: str) -> ProjectProfile:
         """
         Detects the project's primary language, framework, and essential commands

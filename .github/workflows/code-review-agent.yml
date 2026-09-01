@@ -1,0 +1,77 @@
+name: Autonomous Code Review Agent (Dogfood)
+
+on:
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  code-review:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: agent_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Needed for proper git diffs
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Install gVisor (runsc)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apt-transport-https ca-certificates curl gnupg
+          curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y runsc
+
+      - name: Configure Docker to use gVisor
+        run: |
+          sudo tee /etc/docker/daemon.json <<EOF
+          {
+              "runtimes": {
+                  "runsc": {
+                      "path": "/usr/bin/runsc"
+                  }
+              }
+          }
+          EOF
+          sudo systemctl restart docker
+
+      - name: Build Sandbox Image
+        run: docker build -t autonomous-sandbox:latest -f Dockerfile.sandbox .
+
+      - name: Run Code Review Agent (Shadow Mode)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DATABASE_URL: postgresql+asyncpg://postgres:password@localhost:5432/agent_db
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Apply database migrations
+          alembic upgrade head
+
+          # Dogfooding: Run the agent locally on the PR's codebase.
+          # We use the CLI interface to analyze the diffs and output a report to the logs.
+          python -m src.cli --repo .

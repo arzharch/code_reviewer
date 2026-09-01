@@ -1,8 +1,12 @@
+import uuid
+from typing import Dict, Any, Optional
+
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import declarative_base
 from contextlib import asynccontextmanager
 
 from .config import settings
+from .models import Run, AuditLog
 
 # Base class for SQLAlchemy models
 Base = declarative_base()
@@ -44,3 +48,36 @@ async def get_db_session():
             raise
         finally:
             await session.close()
+
+
+
+async def log_run(run_id: str, repo: str, status: str, surface: str = "github_app", pr_number: Optional[int] = None, profile: Optional[Dict[str, Any]] = None):
+    async with get_db_session() as session:
+        # Check if exists
+        from sqlalchemy import select
+        result = await session.execute(select(Run).where(Run.id == uuid.UUID(run_id)))
+        run = result.scalar_one_or_none()
+        
+        if run:
+            run.status = status
+            if profile:
+                run.profile = profile
+        else:
+            run = Run(
+                id=uuid.UUID(run_id),
+                repo=repo,
+                pr_number=pr_number,
+                surface=surface,
+                status=status,
+                profile=profile or {}
+            )
+            session.add(run)
+
+async def write_audit_log(run_id: str, event_type: str, payload: Dict[str, Any]):
+    async with get_db_session() as session:
+        log_entry = AuditLog(
+            run_id=uuid.UUID(run_id),
+            event_type=event_type,
+            payload=payload
+        )
+        session.add(log_entry)
