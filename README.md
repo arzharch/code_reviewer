@@ -23,12 +23,11 @@ running untrusted PR code.
 - **Risk Engine:** deterministic weighted scoring with hard gates on test failure
   and file criticality. No LLM sits in the commit decision.
 
-> **Implementation status.** The control/execution split is a code boundary today,
-> not a deployment boundary: both run in one process, and the sandbox is a
-> temp-directory copy rather than a microVM. Kubernetes, KEDA autoscaling, a
-> durable job queue, and gVisor isolation are the next stages — see
-> [Roadmap](#6-roadmap). The design doc
-> (`autonomous-code-review-agent-architecture.md`) describes the full target.
+> **Implementation status.** The system now fully isolates the Control and Execution planes.
+> The webhook processing relies on an **ARQ Redis Queue**, which delegates heavy LangGraph jobs
+> to background worker pods. Execution happens inside **gVisor (`runsc`)** isolated containers.
+> The architecture is scaled automatically from 0-10 pods via **KEDA** on Kubernetes.
+> The design doc (`autonomous-code-review-agent-architecture.md`) describes the full target.
 
 ## 2. Agentic Architecture (LangGraph Topology)
 
@@ -148,7 +147,7 @@ routing, risk scoring, and every branch of the auto-commit vs escalate decision.
 | 0 | Secret isolation in the sandbox, packaging, hygiene | Done |
 | 1 | Verified auto-commit and push to the PR branch | Done |
 | 2 | Plan-and-execute topology, per-proposal subgraph, repair budget, observability | Done |
-| 3 | Redis Streams queue + separate worker, retries, run/audit persistence, autonomy modes | Next |
-| 4 | Real sandbox isolation via gVisor (`runsc`), no host network, resource caps | Planned |
-| 5 | Kubernetes deployment, KEDA scaling on queue depth, `RuntimeClass: gvisor` | Planned |
-| 6 | CI, dogfooding the agent on this repository | Planned |
+| 3 | Redis Streams queue + separate worker, retries, run/audit persistence, autonomy modes | Done |
+| 4 | Real sandbox isolation via gVisor (`runsc`), no host network, resource caps | Done |
+| 5 | Kubernetes deployment, KEDA scaling on queue depth, `RuntimeClass: gvisor` | Done |
+| 6 | CI, dogfooding the agent on this repository | Next |
